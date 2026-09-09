@@ -3,27 +3,59 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#132238">
 <title>{{.Title}} · ktunnel</title>
 <link rel="stylesheet" href="/static/style.css">
 </head>
-<body>
+<body class="{{if .CSRF}}app-shell{{else}}auth-shell{{end}}">
+<a class="skip-link" href="#main-content">Skip to content</a>
 {{if .CSRF}}
-<nav>
-  <a href="/" class="brand">ktunnel</a>
-  <a href="/" {{if eq .Path "/"}}class="on"{{end}}>Overview</a>
-  <a href="/users" {{if eq .Path "/users"}}class="on"{{end}}>Users</a>
-  <a href="/audit" {{if eq .Path "/audit"}}class="on"{{end}}>Audit</a>
-  <a href="/settings" {{if eq .Path "/settings"}}class="on"{{end}}>Settings</a>
-  <form method="post" action="/logout" class="right">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <button class="link">Sign out</button>
-  </form>
-</nav>
+<aside class="sidebar">
+  <a href="/" class="brand" aria-label="ktunnel overview">
+    <svg class="brand-mark" viewBox="0 0 36 36" aria-hidden="true">
+      <path d="M8 10h8a5 5 0 0 1 5 5v6a5 5 0 0 0 5 5h2"></path>
+      <circle cx="7" cy="10" r="3"></circle>
+      <circle cx="29" cy="26" r="3"></circle>
+      <circle cx="21" cy="18" r="2"></circle>
+    </svg>
+    <span>ktunnel</span>
+  </a>
+  <nav class="primary-nav" aria-label="Main navigation">
+    <a href="/" {{if eq .Path "/"}}class="on" aria-current="page"{{end}}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h6V4H4v9Zm0 7h6v-4H4v4Zm10 0h6v-9h-6v9Zm0-16v4h6V4h-6Z"></path></svg>
+      <span>Overview</span>
+    </a>
+    <a href="/users" {{if or (eq .Path "/users") (hasPrefix .Path "/users/")}}class="on" aria-current="page"{{end}}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8ZM8 13a4 4 0 1 0 0-8 4 4 0 0 0 0 8Zm8 0c-2.67 0-8 1.34-8 4v3h12v-3c0-1.54-1.79-2.65-3.83-3.29M8 13c-3.11 0-7 1.56-7 4.67V20h5v-3c0-1.13.44-2.08 1.17-2.86"></path></svg>
+      <span>Users</span>
+    </a>
+    <a href="/audit" {{if eq .Path "/audit"}}class="on" aria-current="page"{{end}}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3h12v18H6zM9 8h6M9 12h6M9 16h4"></path></svg>
+      <span>Audit log</span>
+    </a>
+    <a href="/settings" {{if eq .Path "/settings"}}class="on" aria-current="page"{{end}}>
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06A1.7 1.7 0 0 0 15 19.4a1.7 1.7 0 0 0-1 .6 1.7 1.7 0 0 0-.4 1.1V21h-4v-.09A1.7 1.7 0 0 0 8.6 19.4a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15a1.7 1.7 0 0 0-.6-1 1.7 1.7 0 0 0-1.1-.4H3v-4h.09A1.7 1.7 0 0 0 4.6 8.6a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.6a1.7 1.7 0 0 0 1-.6 1.7 1.7 0 0 0 .4-1.1V3h4v.09A1.7 1.7 0 0 0 15.4 4.6a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9c.15.38.38.72.69 1 .3.25.69.4 1.1.4H21v4h-.09a1.7 1.7 0 0 0-1.51.6Z"></path></svg>
+      <span>Settings</span>
+    </a>
+  </nav>
+  <div class="sidebar-foot">
+    <div class="control-status"><span aria-hidden="true"></span><div><b>Control plane</b><small>Admin access</small></div></div>
+    <form method="post" action="/logout">
+      <input type="hidden" name="csrf" value="{{.CSRF}}">
+      <button class="nav-signout" type="submit">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3M15 3h5v18h-5"></path></svg>
+        <span>Sign out</span>
+      </button>
+    </form>
+  </div>
+</aside>
 {{end}}
-<main>
-{{if .Msg}}<div class="flash ok">{{.Msg}}</div>{{end}}
-{{if .Error}}<div class="flash err">{{.Error}}</div>{{end}}
-{{template "content" .}}
-</main>
+<div class="page-frame">
+  <main id="main-content">
+    {{if .Msg}}<div class="flash ok" role="status"><span aria-hidden="true">✓</span>{{.Msg}}</div>{{end}}
+    {{if .Error}}<div class="flash err" role="alert"><span aria-hidden="true">!</span>{{.Error}}</div>{{end}}
+    {{template "content" .}}
+  </main>
+</div>
 </body>
 </html>

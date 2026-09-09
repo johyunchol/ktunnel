@@ -1,16 +1,57 @@
 {{define "content"}}
-<div class="card narrow">
-  <h1>ktunnel</h1>
-  {{if .NoPassword}}
-    <p class="muted">No admin password is set yet. On the server run:</p>
-    <pre>ktunneld admin set-password</pre>
-  {{else}}
-    <form method="post" action="/login">
-      <label>Admin password
-        <input type="password" name="password" autofocus autocomplete="current-password">
-      </label>
-      <button>Sign in</button>
-    </form>
-  {{end}}
-</div>
+<section class="login-stage">
+  <div class="login-context">
+    <a href="/login" class="brand login-brand" aria-label="ktunnel sign in">
+      <svg class="brand-mark" viewBox="0 0 36 36" aria-hidden="true">
+        <path d="M8 10h8a5 5 0 0 1 5 5v6a5 5 0 0 0 5 5h2"></path>
+        <circle cx="7" cy="10" r="3"></circle>
+        <circle cx="29" cy="26" r="3"></circle>
+        <circle cx="21" cy="18" r="2"></circle>
+      </svg>
+      <span>ktunnel</span>
+    </a>
+    <div class="login-message">
+      <p class="section-kicker">Private infrastructure console</p>
+      <h1>One control plane for every route.</h1>
+      <p>Manage who can connect, which services are exposed, and where every tunnel leads.</p>
+    </div>
+    <div class="route-map" aria-hidden="true">
+      <span class="route-node origin"></span>
+      <span class="route-line first"></span>
+      <span class="route-node relay"></span>
+      <span class="route-line second"></span>
+      <span class="route-node edge"></span>
+      <small class="route-label origin-label">client</small>
+      <small class="route-label relay-label">relay</small>
+      <small class="route-label edge-label">public edge</small>
+    </div>
+  </div>
+  <div class="login-panel-wrap">
+    <div class="card login-panel">
+      <div class="login-heading">
+        <span class="security-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M6 10V7a6 6 0 0 1 12 0v3M5 10h14v11H5zM12 14v3"></path></svg>
+        </span>
+        <div>
+          <h2>Admin sign in</h2>
+          <p>Enter the control plane password.</p>
+        </div>
+      </div>
+      {{if .NoPassword}}
+        <div class="setup-state">
+          <h3>Set a password first</h3>
+          <p>The dashboard stays locked until an admin password is configured on the server.</p>
+          <pre><code>ktunneld admin set-password</code></pre>
+        </div>
+      {{else}}
+        <form method="post" action="/login" class="stack-form">
+          <label for="admin-password">Admin password</label>
+          <input id="admin-password" type="password" name="password" autofocus required autocomplete="current-password">
+          <button type="submit">Sign in to console</button>
+        </form>
+        <p class="login-footnote">Authentication is limited after repeated failures.</p>
+      {{end}}
+    </div>
+  </div>
+</section>
 {{end}}

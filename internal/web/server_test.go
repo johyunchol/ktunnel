@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -357,5 +358,37 @@ func TestSettingsRequireAuthenticationAndCSRF(t *testing.T) {
 	}
 	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte("current-password")); err != nil {
 		t.Fatalf("password changed without CSRF token: %v", err)
+	}
+}
+
+func TestUnicodeUserInitialRenders(t *testing.T) {
+	srv := newTestServer(t, "current-password")
+	u, err := srv.st.CreateUser("한글-user", 5)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	srv.sessions["current"] = webSession{expires: time.Now().Add(time.Hour), csrf: "csrf-token"}
+
+	tests := []struct {
+		path string
+		want string
+	}{
+		{path: "/users", want: `class="user-avatar" aria-hidden="true">한</span>`},
+		{path: "/users/" + strconv.FormatInt(u.ID, 10), want: `class="user-avatar large" aria-hidden="true">한</span>`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req.AddCookie(&http.Cookie{Name: cookieName, Value: "current"})
+			rec := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+			}
+			if !strings.Contains(rec.Body.String(), tt.want) {
+				t.Fatalf("response does not contain rune-safe initial %q", tt.want)
+			}
+		})
 	}
 }

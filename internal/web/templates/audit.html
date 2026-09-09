@@ -1,14 +1,36 @@
 {{define "content"}}
-<h1>Audit log</h1>
-<table>
-  <tr><th>When</th><th>User</th><th>Action</th><th>Detail</th></tr>
-  {{range .Entries}}
-  <tr>
-    <td class="muted">{{when .At}}</td>
-    <td>{{.UserName}}</td>
-    <td><code>{{.Action}}</code></td>
-    <td class="muted">{{.Detail}}</td>
-  </tr>
+<header class="page-header">
+  <div>
+    <h1>Audit log</h1>
+    <p>The latest administrative and access-control events, newest first.</p>
+  </div>
+</header>
+
+<section class="content-section first-section">
+  <div class="section-heading">
+    <div><h2>Recent activity</h2><p>Up to 200 events are retained in this view.</p></div>
+    {{if .Entries}}<span class="count-badge">{{len .Entries}} events</span>{{end}}
+  </div>
+  {{if .Entries}}
+  <div class="table-shell audit-table">
+    <table>
+      <caption class="sr-only">Recent audit activity</caption>
+      <thead><tr><th scope="col">Time</th><th scope="col">User</th><th scope="col">Action</th><th scope="col">Detail</th></tr></thead>
+      <tbody>{{range .Entries}}
+      <tr>
+        <td class="muted technical nowrap">{{when .At}}</td>
+        <td class="primary-cell">{{if .UserName}}{{.UserName}}{{else}}System{{end}}</td>
+        <td><code class="event-code">{{.Action}}</code></td>
+        <td class="muted">{{.Detail}}</td>
+      </tr>
+      {{end}}</tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty-state">
+    <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3h12v18H6zM9 8h6M9 12h6M9 16h4"></path></svg></span>
+    <div><h3>No audit events yet</h3><p>User, token, session, and password changes will be recorded here.</p></div>
+  </div>
   {{end}}
-</table>
+</section>
 {{end}}

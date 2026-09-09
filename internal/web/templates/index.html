@@ -1,46 +1,87 @@
 {{define "content"}}
-<h1>Overview</h1>
-<div class="stats">
-  <div><b>{{len .Proxies}}</b><span>live tunnels</span></div>
-  <div><b>{{len .Sessions}}</b><span>connected clients</span></div>
-  <div><b>{{.UserCount}}</b><span>users</span></div>
-</div>
+<header class="page-header">
+  <div>
+    <h1>Overview</h1>
+    <p>Live activity across the relay, from authenticated clients to public routes.</p>
+  </div>
+</header>
 
-<h2>Live tunnels</h2>
-{{if .Proxies}}
-<table>
-  <tr><th>Address</th><th>User</th><th>Type</th><th>Up</th></tr>
-  {{range .Proxies}}
-  <tr>
-    <td>{{if eq .Type "http"}}<a href="https://{{.Subdomain}}.{{$.Domain}}" target="_blank">{{.Subdomain}}.{{$.Domain}}</a>{{else}}tcp :{{.RemotePort}}{{end}}</td>
-    <td><a href="/users/{{.UserID}}">{{.UserName}}</a></td>
-    <td>{{.Type}}</td>
-    <td class="muted">{{ago .StartedAt}}</td>
-  </tr>
-  {{end}}
-</table>
-{{else}}<p class="muted">Nothing is exposed right now.</p>{{end}}
+<section class="activity-summary" aria-labelledby="activity-heading">
+  <div class="summary-route" aria-hidden="true">
+    <span class="summary-node"></span><i></i><span class="summary-node relay"></span><i></i><span class="summary-node"></span>
+  </div>
+  <div class="summary-copy">
+    <h2 id="activity-heading">Current activity</h2>
+    <p>Connections reported by the control plane now.</p>
+  </div>
+  <dl class="stats">
+    <div><dt>Live tunnels</dt><dd>{{len .Proxies}}</dd></div>
+    <div><dt>Connected clients</dt><dd>{{len .Sessions}}</dd></div>
+    <div><dt>Users</dt><dd>{{.UserCount}}</dd></div>
+  </dl>
+</section>
 
-<h2>Connected clients</h2>
-{{if .Sessions}}
-<table>
-  <tr><th>User</th><th>Host</th><th>From</th><th>Token</th><th>Since</th><th>Seen</th><th></th></tr>
-  {{range .Sessions}}
-  <tr>
-    <td><a href="/users/{{.UserID}}">{{.UserName}}</a></td>
-    <td>{{.Hostname}} <span class="muted">{{.OS}}/{{.Arch}}</span></td>
-    <td class="muted">{{.ClientAddr}}</td>
-    <td class="muted">{{.TokenLabel}}</td>
-    <td class="muted">{{ago .StartedAt}}</td>
-    <td class="muted">{{ago .LastSeenAt}}</td>
-    <td>
-      <form method="post" action="/sessions/{{.ID}}/kill" onsubmit="return confirm('Disconnect {{.UserName}}@{{.Hostname}}?')">
-        <input type="hidden" name="csrf" value="{{$.CSRF}}">
-        <button class="danger small">Disconnect</button>
-      </form>
-    </td>
-  </tr>
+<section class="content-section">
+  <div class="section-heading">
+    <div><h2>Live tunnels</h2><p>Public endpoints currently routed through ktunnel.</p></div>
+    {{if .Proxies}}<span class="count-badge">{{len .Proxies}} live</span>{{end}}
+  </div>
+  {{if .Proxies}}
+  <div class="table-shell">
+    <table>
+      <caption class="sr-only">Live tunnels</caption>
+      <thead><tr><th scope="col">Address</th><th scope="col">User</th><th scope="col">Protocol</th><th scope="col">Connected</th></tr></thead>
+      <tbody>{{range .Proxies}}
+      <tr>
+        <td class="primary-cell">{{if eq .Type "http"}}<a class="external-link" href="https://{{.Subdomain}}.{{$.Domain}}" target="_blank" rel="noopener noreferrer">{{.Subdomain}}.{{$.Domain}}<span aria-hidden="true">↗</span></a>{{else}}<code>tcp :{{.RemotePort}}</code>{{end}}</td>
+        <td><a href="/users/{{.UserID}}">{{.UserName}}</a></td>
+        <td><span class="protocol-tag">{{.Type}}</span></td>
+        <td class="muted technical">{{ago .StartedAt}}</td>
+      </tr>
+      {{end}}</tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty-state">
+    <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12h5m6 0h5M9 8l3 4-3 4m6-8-3 4 3 4"></path></svg></span>
+    <div><h3>No live tunnels</h3><p>When a user exposes a service with <code>ktunnel http</code> or <code>ktunnel tcp</code>, its route will appear here.</p></div>
+  </div>
   {{end}}
-</table>
-{{else}}<p class="muted">No clients connected.</p>{{end}}
+</section>
+
+<section class="content-section">
+  <div class="section-heading">
+    <div><h2>Connected clients</h2><p>Authenticated machines with an active relay session.</p></div>
+    {{if .Sessions}}<span class="count-badge">{{len .Sessions}} connected</span>{{end}}
+  </div>
+  {{if .Sessions}}
+  <div class="table-shell">
+    <table>
+      <caption class="sr-only">Connected clients</caption>
+      <thead><tr><th scope="col">User</th><th scope="col">Machine</th><th scope="col">Source</th><th scope="col">Token</th><th scope="col">Connected</th><th scope="col">Last seen</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+      <tbody>{{range .Sessions}}
+      <tr>
+        <td class="primary-cell"><a href="/users/{{.UserID}}">{{.UserName}}</a></td>
+        <td>{{.Hostname}} <span class="sub-value">{{.OS}}/{{.Arch}}</span></td>
+        <td class="muted technical">{{.ClientAddr}}</td>
+        <td class="muted">{{.TokenLabel}}</td>
+        <td class="muted technical">{{ago .StartedAt}}</td>
+        <td class="muted technical">{{ago .LastSeenAt}}</td>
+        <td class="action-cell">
+          <form method="post" action="/sessions/{{.ID}}/kill" onsubmit="return confirm('Disconnect {{.UserName}}@{{.Hostname}}?')">
+            <input type="hidden" name="csrf" value="{{$.CSRF}}">
+            <button class="danger ghost small" type="submit">Disconnect</button>
+          </form>
+        </td>
+      </tr>
+      {{end}}</tbody>
+    </table>
+  </div>
+  {{else}}
+  <div class="empty-state">
+    <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="7" cy="12" r="3"></circle><circle cx="17" cy="12" r="3"></circle><path d="M10 12h4"></path></svg></span>
+    <div><h3>No clients connected</h3><p>Issue a token from <a href="/users">Users</a>, then have the user run <code>ktunnel login &lt;token&gt;</code>.</p></div>
+  </div>
+  {{end}}
+</section>
 {{end}}

@@ -1,86 +1,141 @@
 {{define "content"}}
-<p><a href="/users" class="muted">← Users</a></p>
-<h1>{{.User.Name}} {{if .User.Disabled}}<span class="tag off">disabled</span>{{end}}</h1>
+<nav class="breadcrumb" aria-label="Breadcrumb"><a href="/users">Users</a><span aria-hidden="true">/</span><span>{{.User.Name}}</span></nav>
+<header class="page-header user-header">
+  <div class="user-title">
+    <span class="user-avatar large" aria-hidden="true">{{initial .User.Name}}</span>
+    <div><h1>{{.User.Name}}</h1><p>User access, tokens, and assigned routes.</p></div>
+  </div>
+  {{if .User.Disabled}}<span class="tag off"><i></i>Disabled</span>{{else}}<span class="tag on"><i></i>Active</span>{{end}}
+</header>
 
 {{if .NewToken}}
-<div class="card token">
-  <h2>New token — shown once</h2>
-  <p>Copy it now; it cannot be displayed again.</p>
-  <pre>{{.NewToken}}</pre>
-  <p class="muted">On the user's machine:</p>
-  <pre>ktunnel login {{.NewToken}}</pre>
-</div>
+<section class="token-reveal" aria-labelledby="new-token-heading">
+  <div class="token-alert">
+    <span class="token-alert-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 15a4 4 0 1 1 3.75-5.4L21 9v4h-3v3h-3v3h-3l-1.2-1.2"></path><circle cx="7" cy="15" r="1"></circle></svg></span>
+    <div>
+      <h2 id="new-token-heading">Token issued — copy it now</h2>
+      <p>This token is shown once and cannot be recovered. Send it to {{.User.Name}} through a secure channel.</p>
+    </div>
+  </div>
+  <div class="secret-value"><code>{{.NewToken}}</code></div>
+  <ol class="token-next-steps">
+    <li><span>1</span><div><b>Share the token</b><small>The user does not visit this dashboard. Deliver it out of band.</small></div></li>
+    <li><span>2</span><div><b>Save credentials</b><code>ktunnel login &lt;token&gt;</code></div></li>
+    <li><span>3</span><div><b>Expose a local service</b><code>ktunnel http 3000</code></div></li>
+  </ol>
+</section>
 {{end}}
 
-<div class="cols">
-<section>
-  <h2>Tokens</h2>
-  {{if .Tokens}}
-  <table>
-    <tr><th>Label</th><th>Prefix</th><th>Created</th><th>Last used</th><th></th></tr>
-    {{range .Tokens}}
-    <tr class="{{if not .Active}}dim{{end}}">
-      <td>{{.Label}}</td>
-      <td><code>{{.Prefix}}…</code></td>
-      <td class="muted">{{when .CreatedAt}}</td>
-      <td class="muted">{{ago .LastUsedAt}}</td>
-      <td>{{if .Active}}
-        <form method="post" action="/tokens/{{.ID}}/revoke" onsubmit="return confirm('Revoke token {{.Label}}? Its sessions drop within 30s.')">
-          <input type="hidden" name="csrf" value="{{$.CSRF}}">
-          <button class="danger small">Revoke</button>
-        </form>{{else}}<span class="tag off">revoked {{when .RevokedAt}}</span>{{end}}
-      </td>
-    </tr>
-    {{end}}
-  </table>
-  {{else}}<p class="muted">No tokens yet.</p>{{end}}
-  <form method="post" action="/users/{{.User.ID}}/tokens" class="row">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <input name="label" placeholder="label, e.g. laptop">
-    <button>Issue token</button>
-  </form>
-</section>
+<div class="detail-layout">
+  <div class="detail-primary">
+    <section class="content-section first-section">
+      <div class="section-heading">
+        <div><h2>Access tokens</h2><p>Issue one token per device so access can be revoked independently.</p></div>
+        {{if .Tokens}}<span class="count-badge">{{len .Tokens}} total</span>{{end}}
+      </div>
+      {{if .Tokens}}
+      <div class="table-shell">
+        <table>
+          <caption class="sr-only">Tokens issued to {{.User.Name}}</caption>
+          <thead><tr><th scope="col">Label</th><th scope="col">Token prefix</th><th scope="col">Created</th><th scope="col">Last used</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody>{{range .Tokens}}
+          <tr class="{{if not .Active}}dim{{end}}">
+            <td class="primary-cell">{{.Label}}</td>
+            <td><code>{{.Prefix}}…</code></td>
+            <td class="muted technical">{{when .CreatedAt}}</td>
+            <td class="muted technical">{{ago .LastUsedAt}}</td>
+            <td class="action-cell">{{if .Active}}
+              <form method="post" action="/tokens/{{.ID}}/revoke" onsubmit="return confirm('Revoke token {{.Label}}? Its sessions drop within 30s.')">
+                <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                <button class="danger ghost small" type="submit">Revoke</button>
+              </form>{{else}}<span class="tag off">Revoked {{when .RevokedAt}}</span>{{end}}
+            </td>
+          </tr>
+          {{end}}</tbody>
+        </table>
+      </div>
+      {{else}}
+      <div class="empty-state compact">
+        <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M8 15a4 4 0 1 1 3.75-5.4L21 9v4h-3v3h-3v3h-3l-1.2-1.2"></path></svg></span>
+        <div><h3>No tokens issued</h3><p>Issue the first token below, then share it with {{.User.Name}}.</p></div>
+      </div>
+      {{end}}
+      <form method="post" action="/users/{{.User.ID}}/tokens" class="inline-action">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <div class="field grow">
+          <label for="token-label">Device label</label>
+          <input id="token-label" name="label" placeholder="e.g. work-laptop">
+        </div>
+        <button type="submit">Issue new token</button>
+      </form>
+      <p class="form-note">The full token appears only once on this page after it is issued.</p>
+    </section>
 
-<section>
-  <h2>Reserved subdomains</h2>
-  <p class="muted">Only this user may open <code>&lt;name&gt;.{{.Domain}}</code>. Unreserved names are first come, first served.</p>
-  {{if .Reservations}}
-  <table>
-    {{range .Reservations}}
-    <tr>
-      <td><code>{{.Subdomain}}.{{$.Domain}}</code></td>
-      <td class="muted">{{when .CreatedAt}}</td>
-      <td>
-        <form method="post" action="/reservations/{{.Subdomain}}/release">
-          <input type="hidden" name="csrf" value="{{$.CSRF}}">
-          <button class="small">Release</button>
-        </form>
-      </td>
-    </tr>
-    {{end}}
-  </table>
-  {{end}}
-  <form method="post" action="/users/{{.User.ID}}/reservations" class="row">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <input name="subdomain" placeholder="subdomain" required pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?">
-    <button>Reserve</button>
-  </form>
+    <section class="content-section">
+      <div class="section-heading">
+        <div><h2>Reserved subdomains</h2><p>Only {{.User.Name}} can open a reserved address. Unreserved names remain first come, first served.</p></div>
+      </div>
+      {{if .Reservations}}
+      <div class="table-shell">
+        <table>
+          <caption class="sr-only">Subdomains reserved for {{.User.Name}}</caption>
+          <thead><tr><th scope="col">Address</th><th scope="col">Reserved</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody>{{range .Reservations}}
+          <tr>
+            <td class="primary-cell"><code>{{.Subdomain}}.{{$.Domain}}</code></td>
+            <td class="muted technical">{{when .CreatedAt}}</td>
+            <td class="action-cell">
+              <form method="post" action="/reservations/{{.Subdomain}}/release" onsubmit="return confirm('Release {{.Subdomain}}.{{$.Domain}}?')">
+                <input type="hidden" name="csrf" value="{{$.CSRF}}">
+                <button class="secondary small" type="submit">Release</button>
+              </form>
+            </td>
+          </tr>
+          {{end}}</tbody>
+        </table>
+      </div>
+      {{else}}
+      <div class="empty-state compact">
+        <span class="empty-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12h16M7 8l-4 4 4 4m10-8 4 4-4 4"></path></svg></span>
+        <div><h3>No reserved subdomains</h3><p>Add one below if this user needs a stable public address.</p></div>
+      </div>
+      {{end}}
+      <form method="post" action="/users/{{.User.ID}}/reservations" class="inline-action domain-action">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <div class="field grow">
+          <label for="subdomain">Subdomain</label>
+          <div class="domain-input"><input id="subdomain" name="subdomain" placeholder="myapp" required pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?"><span>.{{.Domain}}</span></div>
+        </div>
+        <button type="submit">Reserve subdomain</button>
+      </form>
+    </section>
+  </div>
 
-  <h2>Settings</h2>
-  <form method="post" action="/users/{{.User.ID}}/limit" class="row">
-    <input type="hidden" name="csrf" value="{{.CSRF}}">
-    <label>Max tunnels <input name="max_tunnels" type="number" min="1" value="{{.User.MaxTunnels}}"></label>
-    <button>Save</button>
-  </form>
-  {{if .User.Disabled}}
-  <form method="post" action="/users/{{.User.ID}}/enable" class="row">
-    <input type="hidden" name="csrf" value="{{.CSRF}}"><button>Enable account</button>
-  </form>
-  {{else}}
-  <form method="post" action="/users/{{.User.ID}}/disable" class="row" onsubmit="return confirm('Disable {{.User.Name}}? All their sessions drop within 30s.')">
-    <input type="hidden" name="csrf" value="{{.CSRF}}"><button class="danger">Disable account</button>
-  </form>
-  {{end}}
-</section>
+  <aside class="detail-sidebar">
+    <section class="card account-card">
+      <div class="card-heading"><div><h2>Account settings</h2><p>Control this user's concurrent capacity.</p></div></div>
+      <form method="post" action="/users/{{.User.ID}}/limit" class="stack-form compact-form">
+        <input type="hidden" name="csrf" value="{{.CSRF}}">
+        <label for="max-tunnels">Maximum live tunnels</label>
+        <input id="max-tunnels" name="max_tunnels" type="number" min="1" value="{{.User.MaxTunnels}}">
+        <button type="submit">Save tunnel limit</button>
+      </form>
+    </section>
+
+    <section class="danger-zone">
+      <h2>{{if .User.Disabled}}Account disabled{{else}}Danger zone{{end}}</h2>
+      {{if .User.Disabled}}
+      <p>Enable this account to allow new connections again.</p>
+      <form method="post" action="/users/{{.User.ID}}/enable">
+        <input type="hidden" name="csrf" value="{{.CSRF}}"><button type="submit">Enable account</button>
+      </form>
+      {{else}}
+      <p>Disabling prevents new connections. Live sessions drop at their next heartbeat.</p>
+      <form method="post" action="/users/{{.User.ID}}/disable" onsubmit="return confirm('Disable {{.User.Name}}? All their sessions drop within 30s.')">
+        <input type="hidden" name="csrf" value="{{.CSRF}}"><button class="danger" type="submit">Disable account</button>
+      </form>
+      {{end}}
+    </section>
+  </aside>
 </div>
 {{end}}

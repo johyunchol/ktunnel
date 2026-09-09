@@ -58,8 +58,10 @@ type Server struct {
 
 func New(st *store.Store, logger *log.Logger) (*Server, error) {
 	funcs := template.FuncMap{
-		"ago":  ago,
-		"when": when,
+		"ago":       ago,
+		"when":      when,
+		"initial":   initial,
+		"hasPrefix": strings.HasPrefix,
 	}
 	pages := map[string]*template.Template{}
 	for _, name := range []string{"login", "index", "users", "user", "audit", "settings"} {
@@ -530,4 +532,11 @@ func when(t time.Time) string {
 		return "—"
 	}
 	return t.Local().Format("2006-01-02 15:04")
+}
+
+func initial(s string) string {
+	for _, r := range s {
+		return string(r)
+	}
+	return ""
 }
