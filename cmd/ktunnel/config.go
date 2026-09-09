@@ -11,8 +11,8 @@ import (
 	"strings"
 )
 
-// Config is the per-machine connection profile, stored in plain text because
-// frp needs the token in the clear anyway. The file is written 0600.
+// Config is the per-machine profile. The token is stored in plain text
+// because it must be sent to the relay in the clear anyway; the file is 0600.
 type Config struct {
 	ServerAddr string
 	ServerPort int
@@ -21,7 +21,7 @@ type Config struct {
 }
 
 // configDir resolves to ~/.config/ktunnel on Unix (XDG, and what the shell
-// version of ktunnel used) and %AppData%\\ktunnel on Windows.
+// version of ktunnel used) and %AppData%\ktunnel on Windows.
 func configDir() (string, error) {
 	if v := os.Getenv("KTUNNEL_CONFIG_DIR"); v != "" {
 		return v, nil
@@ -59,7 +59,7 @@ func LoadConfig() (*Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return nil, fmt.Errorf("not configured yet - run: ktunnel init")
+			return nil, errors.New("not logged in - run: ktunnel login <token>")
 		}
 		return nil, err
 	}
@@ -76,9 +76,8 @@ func LoadConfig() (*Config, error) {
 		if !ok {
 			continue
 		}
-		key = strings.TrimSpace(key)
 		value = strings.Trim(strings.TrimSpace(value), `"`)
-		switch key {
+		switch strings.TrimSpace(key) {
 		case "SERVER_ADDR":
 			cfg.ServerAddr = value
 		case "SERVER_PORT":
@@ -94,20 +93,8 @@ func LoadConfig() (*Config, error) {
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
-
-	var missing []string
-	if cfg.ServerAddr == "" {
-		missing = append(missing, "SERVER_ADDR")
-	}
-	if cfg.Domain == "" {
-		missing = append(missing, "DOMAIN")
-	}
-	if cfg.Token == "" {
-		missing = append(missing, "TOKEN")
-	}
-	if len(missing) > 0 {
-		return nil, fmt.Errorf("%s missing from %s - run: ktunnel init",
-			strings.Join(missing, ", "), path)
+	if cfg.ServerAddr == "" || cfg.Domain == "" || cfg.Token == "" {
+		return nil, fmt.Errorf("incomplete config at %s - run: ktunnel login <token>", path)
 	}
 	return cfg, nil
 }
@@ -120,13 +107,12 @@ func (c *Config) Save() error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	path := filepath.Join(dir, "config")
 	body := fmt.Sprintf(""+
-		"# ktunnel configuration\n"+
+		"# ktunnel configuration - written by `ktunnel login`\n"+
 		"SERVER_ADDR=%q\n"+
 		"SERVER_PORT=%q\n"+
 		"DOMAIN=%q\n"+
 		"TOKEN=%q\n",
 		c.ServerAddr, strconv.Itoa(c.ServerPort), c.Domain, c.Token)
-	return os.WriteFile(path, []byte(body), 0o600)
+	return os.WriteFile(filepath.Join(dir, "config"), []byte(body), 0o600)
 }

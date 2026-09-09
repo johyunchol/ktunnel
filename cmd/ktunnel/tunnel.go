@@ -3,8 +3,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
+	"time"
 
 	"github.com/fatedier/frp/client"
+	cproxy "github.com/fatedier/frp/client/proxy"
 	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/config/source"
 	"github.com/fatedier/frp/pkg/util/log"
@@ -31,19 +34,25 @@ func (t Tunnel) PublicURL(cfg *Config) string {
 //
 // frp is used as a library rather than shelled out to, so ktunnel ships as a
 // single binary with no frpc or Docker on the target machine.
-func (t Tunnel) Run(ctx context.Context, cfg *Config, verbose bool) error {
+//
+// Authentication is per user: the personal token travels in the login
+// metadata and ktunneld (the frps plugin) decides. There is no shared frps
+// secret for clients to hold.
+func (t Tunnel) Run(ctx context.Context, cfg *Config, verbose bool, onReady func()) error {
 	enabled := true
 
 	common := &v1.ClientCommonConfig{
 		ServerAddr:    cfg.ServerAddr,
 		ServerPort:    cfg.ServerPort,
 		LoginFailExit: &enabled,
-		Auth: v1.AuthClientConfig{
-			Method: "token",
-			Token:  cfg.Token,
-		},
+		Metadatas:     map[string]string{"token": cfg.Token},
 		Transport: v1.ClientTransportConfig{
 			TLS: v1.TLSClientConfig{Enable: &enabled},
+			// frp disables heartbeats when TCP multiplexing is on (the
+			// default) and relies on yamux keepalives instead. We need the
+			// Ping hook to fire so that revoked tokens are cut off promptly.
+			HeartbeatInterval: 30,
+			HeartbeatTimeout:  90,
 		},
 	}
 	common.Log.Level = "warn"
@@ -91,5 +100,48 @@ func (t Tunnel) Run(ctx context.Context, cfg *Config, verbose bool) error {
 	if err != nil {
 		return err
 	}
-	return svc.Run(ctx)
+
+	// When frps rejects the proxy (reserved subdomain, limit reached, ...)
+	// frpc keeps the control connection open and quietly retries. Watch the
+	// proxy status so the user gets the reason and their prompt back.
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	runErr := make(chan error, 1)
+	go func() { runErr <- svc.Run(runCtx) }()
+
+	// Once live, frpc reconnects on its own after any drop and never gives
+	// up - even when the relay is refusing it because the token was revoked
+	// or an administrator disconnected the session. A brief outage is
+	// tolerated; anything longer than lostAfter means the session is gone.
+	const lostAfter = 15 * time.Second
+
+	ticker := time.NewTicker(300 * time.Millisecond)
+	defer ticker.Stop()
+	announced := false
+	var lastRunning time.Time
+	for {
+		select {
+		case err := <-runErr:
+			return err
+		case <-ticker.C:
+			st, ok := svc.StatusExporter().GetProxyStatus(t.Name)
+			running := ok && st.Phase == cproxy.ProxyPhaseRunning
+			switch {
+			case ok && st.Phase == cproxy.ProxyPhaseStartErr:
+				cancel()
+				<-runErr
+				return fmt.Errorf("%s", strings.TrimPrefix(st.Err, "start proxy error: "))
+			case running:
+				lastRunning = time.Now()
+				if !announced && onReady != nil {
+					announced = true
+					onReady()
+				}
+			case announced && time.Since(lastRunning) > lostAfter:
+				cancel()
+				<-runErr
+				return fmt.Errorf("connection to the relay was lost - the token may have been revoked, the session disconnected by an administrator, or the relay is down")
+			}
+		}
+	}
 }

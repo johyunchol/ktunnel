@@ -1,0 +1,46 @@
+{{define "content"}}
+<h1>Overview</h1>
+<div class="stats">
+  <div><b>{{len .Proxies}}</b><span>live tunnels</span></div>
+  <div><b>{{len .Sessions}}</b><span>connected clients</span></div>
+  <div><b>{{.UserCount}}</b><span>users</span></div>
+</div>
+
+<h2>Live tunnels</h2>
+{{if .Proxies}}
+<table>
+  <tr><th>Address</th><th>User</th><th>Type</th><th>Up</th></tr>
+  {{range .Proxies}}
+  <tr>
+    <td>{{if eq .Type "http"}}<a href="https://{{.Subdomain}}.{{$.Domain}}" target="_blank">{{.Subdomain}}.{{$.Domain}}</a>{{else}}tcp :{{.RemotePort}}{{end}}</td>
+    <td><a href="/users/{{.UserID}}">{{.UserName}}</a></td>
+    <td>{{.Type}}</td>
+    <td class="muted">{{ago .StartedAt}}</td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<p class="muted">Nothing is exposed right now.</p>{{end}}
+
+<h2>Connected clients</h2>
+{{if .Sessions}}
+<table>
+  <tr><th>User</th><th>Host</th><th>From</th><th>Token</th><th>Since</th><th>Seen</th><th></th></tr>
+  {{range .Sessions}}
+  <tr>
+    <td><a href="/users/{{.UserID}}">{{.UserName}}</a></td>
+    <td>{{.Hostname}} <span class="muted">{{.OS}}/{{.Arch}}</span></td>
+    <td class="muted">{{.ClientAddr}}</td>
+    <td class="muted">{{.TokenLabel}}</td>
+    <td class="muted">{{ago .StartedAt}}</td>
+    <td class="muted">{{ago .LastSeenAt}}</td>
+    <td>
+      <form method="post" action="/sessions/{{.ID}}/kill" onsubmit="return confirm('Disconnect {{.UserName}}@{{.Hostname}}?')">
+        <input type="hidden" name="csrf" value="{{$.CSRF}}">
+        <button class="danger small">Disconnect</button>
+      </form>
+    </td>
+  </tr>
+  {{end}}
+</table>
+{{else}}<p class="muted">No clients connected.</p>{{end}}
+{{end}}

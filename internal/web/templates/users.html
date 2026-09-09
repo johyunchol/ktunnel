@@ -1,0 +1,24 @@
+{{define "content"}}
+<h1>Users</h1>
+<table>
+  <tr><th>Name</th><th>Limit</th><th>Status</th><th>Created</th></tr>
+  {{range .Users}}
+  <tr>
+    <td><a href="/users/{{.ID}}">{{.Name}}</a></td>
+    <td class="muted">{{.MaxTunnels}} tunnels</td>
+    <td>{{if .Disabled}}<span class="tag off">disabled</span>{{else}}<span class="tag on">active</span>{{end}}</td>
+    <td class="muted">{{when .CreatedAt}}</td>
+  </tr>
+  {{end}}
+</table>
+
+<div class="card">
+  <h2>Add user</h2>
+  <form method="post" action="/users" class="row">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input name="name" placeholder="name" required pattern="[a-z0-9._-]+" title="lowercase letters, digits, . _ -">
+    <input name="max_tunnels" type="number" min="1" value="5" title="max concurrent tunnels">
+    <button>Create</button>
+  </form>
+</div>
+{{end}}

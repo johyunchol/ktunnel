@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -15,7 +14,7 @@ import (
 	"strings"
 	"syscall"
 
-	"golang.org/x/term"
+	"github.com/johyunchol/ktunnel/internal/store"
 )
 
 var version = "dev" // overridden at build time via -ldflags
@@ -36,8 +35,12 @@ func run(args []string) error {
 	}
 	cmd, rest := args[0], args[1:]
 	switch cmd {
-	case "init":
-		return cmdInit()
+	case "login":
+		return cmdLogin(rest)
+	case "logout":
+		return cmdLogout()
+	case "status", "whoami":
+		return cmdStatus()
 	case "http":
 		return cmdTunnel("http", rest)
 	case "tcp":
@@ -53,45 +56,48 @@ func run(args []string) error {
 	}
 }
 
-func cmdInit() error {
-	in := bufio.NewReader(os.Stdin)
-	fmt.Println("ktunnel setup")
-
-	addr := prompt(in, "frps server address (e.g. nas.example.com): ")
-	if addr == "" {
-		return errors.New("server address is required")
+// cmdLogin stores a personal token. The token carries the relay address and
+// domain, so it is the only thing a user needs to be handed.
+func cmdLogin(args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: ktunnel login <token>")
 	}
-	portStr := prompt(in, "frps server port [7000]: ")
-	port := 7000
-	if portStr != "" {
-		n, err := strconv.Atoi(portStr)
-		if err != nil {
-			return fmt.Errorf("invalid port %q", portStr)
-		}
-		port = n
-	}
-	domain := prompt(in, "wildcard domain (e.g. example.com): ")
-	if domain == "" {
-		return errors.New("domain is required")
-	}
-
-	fmt.Print("auth token (hidden): ")
-	tokenBytes, err := term.ReadPassword(int(syscall.Stdin))
-	fmt.Println()
+	token := strings.TrimSpace(args[0])
+	info, err := store.ParseToken(token)
 	if err != nil {
-		return fmt.Errorf("failed to read token: %w", err)
+		return fmt.Errorf("%v - ask the administrator for a token", err)
 	}
-	token := strings.TrimSpace(string(tokenBytes))
-	if token == "" {
-		return errors.New("token is required")
-	}
-
-	cfg := &Config{ServerAddr: addr, ServerPort: port, Domain: domain, Token: token}
+	cfg := &Config{ServerAddr: info.Addr, ServerPort: info.Port, Domain: info.Domain, Token: token}
 	if err := cfg.Save(); err != nil {
 		return err
 	}
 	path, _ := configPath()
-	fmt.Printf("saved -> %s\n\nTry it:  ktunnel http 3000\n", path)
+	fmt.Printf("logged in to %s (*.%s)\nsaved -> %s\n\nTry it:  ktunnel http 3000\n", info.Addr, info.Domain, path)
+	return nil
+}
+
+func cmdLogout() error {
+	path, err := configPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	fmt.Println("logged out")
+	return nil
+}
+
+func cmdStatus() error {
+	cfg, err := LoadConfig()
+	if err != nil {
+		return err
+	}
+	prefix := cfg.Token
+	if i := strings.LastIndex(prefix, "."); i >= 0 && len(prefix)-i > 9 {
+		prefix = prefix[i+1 : i+9]
+	}
+	fmt.Printf("server  %s:%d\ndomain  *.%s\ntoken   %s…\n", cfg.ServerAddr, cfg.ServerPort, cfg.Domain, prefix)
 	return nil
 }
 
@@ -104,6 +110,7 @@ func cmdTunnel(kind string, args []string) error {
 	verbose := fs.Bool("verbose", false, "show frp client logs")
 	fs.StringVar(name, "n", "", "shorthand for --name")
 	fs.BoolVar(verbose, "V", false, "shorthand for --verbose")
+
 	// Go's flag package stops at the first positional argument, which would
 	// silently ignore "ktunnel http 3000 --name myapp" - the order everyone
 	// actually types. Split the two apart before parsing.
@@ -146,12 +153,13 @@ func cmdTunnel(kind string, args []string) error {
 
 	fmt.Printf("\n  %s\n", t.PublicURL(cfg))
 	fmt.Printf("  -> %s:%d   (%s)\n\n", t.LocalIP, t.LocalPort, t.Type)
-	fmt.Println("Ctrl-C to stop.")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	err = t.Run(ctx, cfg, *verbose)
+	err = t.Run(ctx, cfg, *verbose, func() {
+		fmt.Println("live - Ctrl-C to stop.")
+	})
 	if ctx.Err() != nil { // cancelled by the user, not a failure
 		fmt.Println("\ntunnel closed")
 		return nil
@@ -184,19 +192,15 @@ func splitArgs(args []string) (positional, flags []string) {
 	return positional, flags
 }
 
-func prompt(in *bufio.Reader, label string) string {
-	fmt.Print(label)
-	line, _ := in.ReadString('\n')
-	return strings.TrimSpace(line)
-}
-
 func usage() {
 	fmt.Print(`ktunnel - expose a local port at https://<name>.<domain>
 
 USAGE
-  ktunnel init                        configure server address, token, domain
+  ktunnel login <token>               store the token you were given
   ktunnel http <port> [options]       expose an HTTP service
   ktunnel tcp  <port> --remote <n>    expose a raw TCP service
+  ktunnel status                      show where you are logged in
+  ktunnel logout
   ktunnel version
 
 OPTIONS
@@ -206,9 +210,10 @@ OPTIONS
   -V, --verbose       show frp client logs
 
 EXAMPLES
+  ktunnel login kt1.…
   ktunnel http 3000
   ktunnel http 3000 --name myapp
   ktunnel http 8080 --host 192.168.10.50
-  ktunnel tcp 22 --remote 16022
+  ktunnel tcp 22 --remote 20022
 `)
 }

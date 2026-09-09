@@ -1,0 +1,16 @@
+{{define "content"}}
+<div class="card narrow">
+  <h1>ktunnel</h1>
+  {{if .NoPassword}}
+    <p class="muted">No admin password is set yet. On the server run:</p>
+    <pre>ktunneld admin set-password</pre>
+  {{else}}
+    <form method="post" action="/login">
+      <label>Admin password
+        <input type="password" name="password" autofocus autocomplete="current-password">
+      </label>
+      <button>Sign in</button>
+    </form>
+  {{end}}
+</div>
+{{end}}

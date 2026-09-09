@@ -1,10 +1,11 @@
 # Server setup
 
-The server side is three pieces:
+The relay is four pieces:
 
 1. **A wildcard TLS certificate** for `*.example.com`
 2. **frps** — accepts client connections and routes by `Host` header
 3. **A TLS-terminating proxy** that sends unregistered subdomains to frps
+4. **ktunneld** — per-user tokens, subdomain ownership, dashboard
 
 ## 1. Wildcard certificate
 
@@ -44,6 +45,8 @@ Gotchas worth knowing up front:
 - The alias target must actually resolve; some DNS UIs validate this.
 - `*.example.com` covers one label only. `a.b.example.com` needs its own
   `*.b.example.com` entry in the certificate.
+- A freshly created dedyn.io zone can take a while to be delegated by its
+  parent; DNSSEC-validating resolvers answer SERVFAIL until then.
 
 Run [`reload-nginx-if-cert-changed.sh`](reload-nginx-if-cert-changed.sh) daily
 from cron — nginx keeps the old certificate in memory until it is reloaded.
@@ -52,12 +55,13 @@ from cron — nginx keeps the old certificate in memory until it is reloaded.
 
 ```bash
 cp frps.toml.example frps.toml
-openssl rand -hex 32          # paste into auth.token
 docker compose up -d
 ```
 
 Expose **only** `bindPort` (7000) to the internet. Keep the dashboard on
-`127.0.0.1`.
+`127.0.0.1`. Note that the example has **no `auth.token`**: authentication is
+handed to ktunneld through the `[[httpPlugins]]` block, so there is no shared
+secret for clients to hold.
 
 ## 3. Wildcard vhost
 
@@ -86,9 +90,81 @@ sudo synow3tool --disable-nginx-sites=tunnel-wildcard.conf
 sudo synosystemctl reload nginx
 ```
 
+## 4. ktunneld
+
+One static binary and one SQLite file. It listens on two loopback ports:
+
+| port | what | reachable from |
+|---|---|---|
+| `7601` | frps plugin hook (`POST /frp`) | frps only — never proxy this |
+| `7600` | dashboard | your TLS proxy, under a hostname you choose |
+
+Keeping the hook on a separate port is what stops the dashboard's public
+hostname from also exposing the authentication endpoint.
+
+```bash
+mkdir -p /srv/ktunneld/data && cp ktunneld-linux-amd64 /srv/ktunneld/ktunneld
+docker run -d --name ktunneld --restart unless-stopped --network host \
+  -v /srv/ktunneld:/app -e KTUNNELD_DB=/app/data/ktunneld.db \
+  alpine:3.20 /app/ktunneld serve \
+    --web 127.0.0.1:7600 --plugin 127.0.0.1:7601 \
+    --server relay.example.com --port 7000 --domain example.com \
+    --tcp-range 20000-29999
+```
+
+`--server/--port/--domain` are what gets baked into every token, so a user only
+ever needs `ktunnel login <token>`. `--tcp-range` is the window `tcp` tunnels
+may claim on the relay — keep it away from anything real, and remember that on
+a DMZ every port in it is internet-facing.
+
+Then, through `docker exec ktunneld /app/ktunneld …`:
+
+```bash
+ktunneld admin set-password            # dashboard login
+ktunneld user add alice
+ktunneld token issue alice --label laptop
+```
+
+### frps side
+
+Add to `frps.toml` and remove any `auth.token`:
+
+```toml
+[[httpPlugins]]
+name = "ktunneld"
+addr = "http://127.0.0.1:7601"
+path = "/frp"
+ops  = ["Login", "NewProxy", "Ping", "CloseProxy"]
+```
+
+Start ktunneld **before** restarting frps: with the plugin unreachable, frps
+fails closed and refuses every login.
+
+### Dashboard
+
+Give `127.0.0.1:7600` a hostname on your TLS proxy — on DSM this is an
+ordinary reverse-proxy entry (exact hostnames are fine there; only wildcards
+are refused) using the wildcard certificate. Sign in with the admin password.
+
+Sessions are cookie-based, `HttpOnly`, `SameSite=Lax`, and `Secure` when the
+proxy sets `X-Forwarded-Proto: https`. Five failed logins from one address
+lock it out for a minute.
+
+### Backups and rollback
+
+State is the single SQLite file (`data/ktunneld.db`, WAL mode). Copy it while
+ktunneld runs — WAL makes that safe — or `docker exec ktunneld /app/ktunneld
+token ls` to check what you would lose.
+
+To go back to a shared-secret frps: restore the previous `frps.toml`
+(with `auth.token`), restart frps, stop ktunneld. Clients would need the shared
+token again; `ktunnel` v0.2 or earlier speaks that model.
+
 ## Verifying
 
 ```bash
 # from outside your own network — a LAN test only proves hairpin NAT
 curl -sI https://anything-unused.example.com | head -1     # 404 from frps = wired up
+docker exec ktunneld /app/ktunneld ls                       # after a client connects
+docker logs ktunneld | tail                                 # "login ok" / "proxy ok" / rejections
 ```

@@ -1,0 +1,86 @@
+{{define "content"}}
+<p><a href="/users" class="muted">← Users</a></p>
+<h1>{{.User.Name}} {{if .User.Disabled}}<span class="tag off">disabled</span>{{end}}</h1>
+
+{{if .NewToken}}
+<div class="card token">
+  <h2>New token — shown once</h2>
+  <p>Copy it now; it cannot be displayed again.</p>
+  <pre>{{.NewToken}}</pre>
+  <p class="muted">On the user's machine:</p>
+  <pre>ktunnel login {{.NewToken}}</pre>
+</div>
+{{end}}
+
+<div class="cols">
+<section>
+  <h2>Tokens</h2>
+  {{if .Tokens}}
+  <table>
+    <tr><th>Label</th><th>Prefix</th><th>Created</th><th>Last used</th><th></th></tr>
+    {{range .Tokens}}
+    <tr class="{{if not .Active}}dim{{end}}">
+      <td>{{.Label}}</td>
+      <td><code>{{.Prefix}}…</code></td>
+      <td class="muted">{{when .CreatedAt}}</td>
+      <td class="muted">{{ago .LastUsedAt}}</td>
+      <td>{{if .Active}}
+        <form method="post" action="/tokens/{{.ID}}/revoke" onsubmit="return confirm('Revoke token {{.Label}}? Its sessions drop within 30s.')">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <button class="danger small">Revoke</button>
+        </form>{{else}}<span class="tag off">revoked {{when .RevokedAt}}</span>{{end}}
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{else}}<p class="muted">No tokens yet.</p>{{end}}
+  <form method="post" action="/users/{{.User.ID}}/tokens" class="row">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input name="label" placeholder="label, e.g. laptop">
+    <button>Issue token</button>
+  </form>
+</section>
+
+<section>
+  <h2>Reserved subdomains</h2>
+  <p class="muted">Only this user may open <code>&lt;name&gt;.{{.Domain}}</code>. Unreserved names are first come, first served.</p>
+  {{if .Reservations}}
+  <table>
+    {{range .Reservations}}
+    <tr>
+      <td><code>{{.Subdomain}}.{{$.Domain}}</code></td>
+      <td class="muted">{{when .CreatedAt}}</td>
+      <td>
+        <form method="post" action="/reservations/{{.Subdomain}}/release">
+          <input type="hidden" name="csrf" value="{{$.CSRF}}">
+          <button class="small">Release</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+  {{end}}
+  <form method="post" action="/users/{{.User.ID}}/reservations" class="row">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input name="subdomain" placeholder="subdomain" required pattern="[a-z0-9]([a-z0-9-]*[a-z0-9])?">
+    <button>Reserve</button>
+  </form>
+
+  <h2>Settings</h2>
+  <form method="post" action="/users/{{.User.ID}}/limit" class="row">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <label>Max tunnels <input name="max_tunnels" type="number" min="1" value="{{.User.MaxTunnels}}"></label>
+    <button>Save</button>
+  </form>
+  {{if .User.Disabled}}
+  <form method="post" action="/users/{{.User.ID}}/enable" class="row">
+    <input type="hidden" name="csrf" value="{{.CSRF}}"><button>Enable account</button>
+  </form>
+  {{else}}
+  <form method="post" action="/users/{{.User.ID}}/disable" class="row" onsubmit="return confirm('Disable {{.User.Name}}? All their sessions drop within 30s.')">
+    <input type="hidden" name="csrf" value="{{.CSRF}}"><button class="danger">Disable account</button>
+  </form>
+  {{end}}
+</section>
+</div>
+{{end}}

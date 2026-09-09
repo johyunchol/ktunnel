@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} · ktunnel</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+{{if .CSRF}}
+<nav>
+  <a href="/" class="brand">ktunnel</a>
+  <a href="/" {{if eq .Path "/"}}class="on"{{end}}>Overview</a>
+  <a href="/users" {{if eq .Path "/users"}}class="on"{{end}}>Users</a>
+  <a href="/audit" {{if eq .Path "/audit"}}class="on"{{end}}>Audit</a>
+  <form method="post" action="/logout" class="right">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <button class="link">Sign out</button>
+  </form>
+</nav>
+{{end}}
+<main>
+{{if .Msg}}<div class="flash ok">{{.Msg}}</div>{{end}}
+{{if .Error}}<div class="flash err">{{.Error}}</div>{{end}}
+{{template "content" .}}
+</main>
+</body>
+</html>

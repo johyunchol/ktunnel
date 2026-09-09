@@ -15,9 +15,11 @@ for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64; d
   os=${target%/*}; arch=${target#*/}
   ext=""; [ "$os" = windows ] && ext=".exe"
   echo "  building $os/$arch"
-  GOOS=$os GOARCH=$arch go build -trimpath \
-    -ldflags "-s -w -X main.version=$VERSION" \
-    -o "dist/ktunnel-${os}-${arch}${ext}" .
+  for bin in ktunnel ktunneld; do
+    GOOS=$os GOARCH=$arch go build -trimpath \
+      -ldflags "-s -w -X main.version=$VERSION" \
+      -o "dist/${bin}-${os}-${arch}${ext}" ./cmd/$bin
+  done
 done
 '
 ( cd "$OUT" && shasum -a 256 * > SHA256SUMS 2>/dev/null || sha256sum * > SHA256SUMS )

@@ -1,12 +1,18 @@
-# frps — tunnel server. Runs on the machine that owns the public IP.
+# frps — tunnel relay. Runs on the machine that owns the public IP.
 bindPort = 7000            # control channel (must be reachable from the internet)
 vhostHTTPPort = 18080      # plain HTTP; the TLS-terminating proxy forwards here
 subdomainHost = "example.com"
 
-auth.method = "token"
-auth.token = "REPLACE_ME"  # openssl rand -hex 32
+# No auth.token on purpose: ktunneld authenticates each client with its own
+# personal token through the plugin hook below. Start ktunneld before frps —
+# with the hook unreachable frps fails closed and refuses every login.
+[[httpPlugins]]
+name = "ktunneld"
+addr = "http://127.0.0.1:7601"
+path = "/frp"
+ops  = ["Login", "NewProxy", "Ping", "CloseProxy"]
 
-webServer.addr = "127.0.0.1"   # dashboard — keep bound to loopback
+webServer.addr = "127.0.0.1"   # frps's own dashboard — keep bound to loopback
 webServer.port = 7500
 webServer.user = "admin"
 webServer.password = "REPLACE_ME"

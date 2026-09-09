@@ -1,0 +1,14 @@
+{{define "content"}}
+<h1>Audit log</h1>
+<table>
+  <tr><th>When</th><th>User</th><th>Action</th><th>Detail</th></tr>
+  {{range .Entries}}
+  <tr>
+    <td class="muted">{{when .At}}</td>
+    <td>{{.UserName}}</td>
+    <td><code>{{.Action}}</code></td>
+    <td class="muted">{{.Detail}}</td>
+  </tr>
+  {{end}}
+</table>
+{{end}}
