@@ -3,7 +3,6 @@ name: release
 on:
   push:
     tags: ['v*']
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -16,6 +15,13 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.25'
+
+      - name: Validate release tag
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "release tag must be an exact stable vMAJOR.MINOR.PATCH version" >&2
+            exit 1
+          fi
 
       - name: Build
         env:
@@ -33,12 +39,13 @@ jobs:
                 -o "dist/${bin}-${os}-${arch}${ext}" ./cmd/$bin
             done
           done
-          cd dist && sha256sum * > SHA256SUMS
 
       - name: Build wheels
         run: |
           python3 packaging/build_wheels.py "${GITHUB_REF_NAME#v}"
           mv dist/wheels/*.whl dist/
+          rmdir dist/wheels
+          (cd dist && sha256sum * > SHA256SUMS)
 
       - uses: softprops/action-gh-release@v2
         with:

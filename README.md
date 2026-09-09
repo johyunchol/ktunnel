@@ -51,11 +51,13 @@ ktunnel update --check                 # 설치하지 않고 업데이트 확인
 `KTUNNEL_NO_UPDATE_CHECK=1`을 설정하세요.
 
 `update`는 릴리스의 SHA-256을 검증한 뒤 현재 바이너리를 원자적으로
-교체합니다. 이 저장소는 비공개이므로 `gh auth login`으로 한 번 인증하거나
-`GH_TOKEN` 또는 `GITHUB_TOKEN`을 제공해야 하며, 해당 GitHub 계정에는 이
-저장소의 읽기 권한이 있어야 합니다. 업데이트 도구는 토큰을 저장하지 않고
-`sudo`를 실행하지도 않습니다. 바이너리가 보호된 디렉터리에 있다면
-`~/.local/bin`처럼 사용자가 쓸 수 있는 경로에 다시 설치하세요.
+교체합니다. 공개 저장소의 릴리스는 로그인 없이 업데이트할 수 있습니다.
+`GH_TOKEN`, `GITHUB_TOKEN` 또는 `gh auth login`으로 인증되어 있으면 해당
+자격 증명을 자동으로 사용해 API 제한을 완화합니다. 바이너리에 내장된
+`ktunnel update`는 공식 `johyunchol/ktunnel` 저장소만 확인하며 임의의 포크로
+전환하지 않습니다. 업데이트 도구는 토큰을 저장하지 않고 `sudo`를 실행하지도
+않습니다. 바이너리가 보호된 디렉터리에 있다면 `~/.local/bin`처럼 사용자가
+쓸 수 있는 경로에 다시 설치하세요.
 `./install.sh --uv`로 설치했다면 wheel 메타데이터와 바이너리가 일치하도록
 같은 설치 명령을 다시 실행해야 합니다. Windows에서는 실행 중인 `.exe`가
 자기 자신을 안전하게 교체할 수 없으므로 정확한 릴리스 자산을 안내하고
@@ -83,11 +85,14 @@ macOS, Linux, Windows용 바이너리는 각 [릴리스](../../releases)에 첨�
 ./install.sh --uv     # 플랫폼별 wheel을 사용해 uv tool로 설치
 ```
 
-저장소가 비공개이므로 두 방법 모두 GitHub CLI를 사용합니다. 먼저
-`gh auth login`을 실행하고 저장소 읽기 권한이 있는 계정으로 인증해야 합니다.
-Windows에서는 `ktunnel-windows-amd64.exe`를 내려받아 `PATH`에 포함된 경로에
-두세요. 바이너리 방식으로 설치한 이후부터는 `ktunnel update` 또는 같은
-기능의 `ktunnel upgrade`로 새 릴리스를 설치할 수 있습니다.
+공개 릴리스는 `curl`로 내려받으므로 GitHub 계정이나 `gh`가 필요하지 않습니다.
+인증된 GitHub CLI가 있으면 설치 스크립트가 이를 자동으로 사용합니다. 비공개
+포크를 설치하려면 `KTUNNEL_REPO=owner/repo`를 지정하고 `gh auth login`으로
+읽기 권한이 있는 계정에 로그인해야 합니다. 내려받은 파일은 `SHA256SUMS`로
+검증한 뒤에만 설치됩니다. Windows에서는
+`ktunnel-windows-amd64.exe`를 내려받아 `PATH`에 포함된 경로에 두세요. 바이너리
+방식으로 설치한 이후부터는 `ktunnel update` 또는 같은 기능의
+`ktunnel upgrade`로 새 릴리스를 설치할 수 있습니다.
 
 ## 관리자 안내
 
@@ -169,8 +174,10 @@ Go 1.25 이상이 필요합니다. Go를 직접 설치하지 않으려면 Docker
 python3 packaging/build_wheels.py 0.5.0
 ```
 
-태그를 만들면 GitHub Actions가 같은 빌드를 실행하고 모든 결과물을 릴리스에
-첨부합니다.
+정확한 안정 버전 태그(예: `v0.5.0`)를 만들면 GitHub Actions가 같은 빌드를
+실행하고 모든 결과물을 릴리스에 첨부합니다. 릴리스 워크플로는 바이너리와
+wheel을 모두 만든 다음 하나의 `SHA256SUMS`를 생성합니다. wheel 항목이 없는
+이전 또는 로컬 체크섬 파일을 새 릴리스에 재사용해서는 안 됩니다.
 
 ## 라이선스
 

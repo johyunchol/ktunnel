@@ -9,9 +9,31 @@ dist/
 config
 *.token
 .env
+.env.*
+!.env.example
+!.env.*.example
 .DS_Store
+
+# real relay configuration (keep the documented example)
+server/frps.toml
+!server/frps.toml.example
+
+# certificates and private keys
+*.pem
+*.key
+*.crt
+*.cert
+*.cer
+*.csr
+*.der
+*.p12
+*.pfx
+*.jks
 
 # sqlite state
 *.db
-*.db-wal
-*.db-shm
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*

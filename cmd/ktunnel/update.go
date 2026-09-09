@@ -89,12 +89,11 @@ func githubToken(ctx context.Context) (string, error) {
 	cmd.Stderr = io.Discard
 	out, err := cmd.Output()
 	if err != nil {
-		return "", errors.New("GitHub 인증이 필요합니다. `gh auth login`을 실행하거나 GH_TOKEN을 설정해 주세요")
+		// Public releases do not require authentication. A configured token is
+		// still useful for private forks and higher API rate limits.
+		return "", nil
 	}
 	token := strings.TrimSpace(string(out))
-	if token == "" {
-		return "", errors.New("GitHub 인증 토큰이 비어 있습니다. `gh auth login`을 다시 실행해 주세요")
-	}
 	return token, nil
 }
 
@@ -120,7 +119,24 @@ func (u *updater) request(ctx context.Context, method, url, accept, token string
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	return u.client.Do(req)
+	client := *u.client
+	previousRedirect := client.CheckRedirect
+	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		// Authentication is only ever sent to the URL we selected. Release asset
+		// redirects commonly leave api.github.com, and credentials must not follow.
+		next.Header.Del("Authorization")
+		if previousRedirect != nil {
+			if err := previousRedirect(next, via); err != nil {
+				return err
+			}
+			next.Header.Del("Authorization")
+		}
+		if len(via) >= 10 {
+			return errors.New("too many redirects")
+		}
+		return nil
+	}
+	return client.Do(req)
 }
 
 func readLimited(body io.Reader, limit int64) ([]byte, error) {
@@ -145,7 +161,7 @@ func (u *updater) latest(ctx context.Context, token string) (*githubRelease, err
 	if resp.StatusCode != http.StatusOK {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
 		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
-			return nil, fmt.Errorf("GitHub 릴리스를 읽을 수 없습니다(HTTP %d). 비공개 저장소 접근 권한을 확인하고 `gh auth login`을 실행해 주세요", resp.StatusCode)
+			return nil, fmt.Errorf("GitHub 릴리스를 읽을 수 없습니다(HTTP %d). 비공개 포크라면 저장소 읽기 권한이 있는 계정으로 `gh auth login`을 실행하거나 GH_TOKEN을 설정해 주세요", resp.StatusCode)
 		}
 		return nil, fmt.Errorf("GitHub 릴리스 조회 실패(HTTP %d)", resp.StatusCode)
 	}
@@ -411,6 +427,30 @@ func backupExecutable(path string, info os.FileInfo) (string, error) {
 	return name, nil
 }
 
+func acquireExplicitUpdateLock(path string, now time.Time) (func(), error) {
+	lockPath := filepath.Join(filepath.Dir(path), ".ktunnel-update.lock")
+	for attempt := 0; attempt < 2; attempt++ {
+		lock, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		if err == nil {
+			_, _ = fmt.Fprintf(lock, "pid=%d time=%d\n", os.Getpid(), now.Unix())
+			_ = lock.Sync()
+			_ = lock.Close()
+			return func() { _ = os.Remove(lockPath) }, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, err
+		}
+		info, statErr := os.Stat(lockPath)
+		if statErr != nil || info.ModTime().After(now) || now.Sub(info.ModTime()) <= 10*time.Minute {
+			return nil, errors.New("다른 ktunnel 업데이트가 진행 중입니다")
+		}
+		if err := os.Remove(lockPath); err != nil {
+			return nil, errors.New("다른 ktunnel 업데이트가 진행 중입니다")
+		}
+	}
+	return nil, errors.New("다른 ktunnel 업데이트가 진행 중입니다")
+}
+
 func (u *updater) install(ctx context.Context, rel *githubRelease, token string) error {
 	if u.goos == "windows" {
 		return fmt.Errorf("Windows에서는 실행 중인 파일을 안전하게 교체할 수 없습니다. %s 에서 %s를 내려받아 기존 ktunnel.exe를 교체해 주세요", rel.HTMLURL, u.assetName())
@@ -426,6 +466,11 @@ func (u *updater) install(ctx context.Context, rel *githubRelease, token string)
 	if isUVInstall(path) {
 		return errors.New("uv로 설치된 ktunnel은 바이너리만 교체할 수 없습니다. 저장소의 `./install.sh --uv`를 실행해 주세요")
 	}
+	releaseLock, err := acquireExplicitUpdateLock(path, u.now())
+	if err != nil {
+		return fmt.Errorf("업데이트 잠금 획득 실패: %w", err)
+	}
+	defer releaseLock()
 	info, err := os.Stat(path)
 	if err != nil {
 		return fmt.Errorf("현재 실행 파일 확인: %w", err)

@@ -82,12 +82,56 @@ func TestLatestUsesGitHubHeadersWithoutLeakingToken(t *testing.T) {
 	}
 }
 
+func TestLatestAndDownloadWorkWithoutAuthentication(t *testing.T) {
+	var releaseAuth, assetAuth string
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/owner/repo/releases/latest":
+			releaseAuth = r.Header.Get("Authorization")
+			fmt.Fprintf(w, `{"tag_name":"v1.2.3","html_url":"%s/release","assets":[{"name":"asset","url":"%s/asset","size":4}]}`, srv.URL, srv.URL)
+		case "/asset":
+			assetAuth = r.Header.Get("Authorization")
+			io.WriteString(w, "data")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	u := testUpdater(t, srv.URL)
+	rel, err := u.latest(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	asset, ok := findAsset(rel, "asset")
+	if !ok {
+		t.Fatal("release asset missing")
+	}
+	var out strings.Builder
+	if err := u.download(context.Background(), asset, "", 10, &out); err != nil {
+		t.Fatal(err)
+	}
+	if releaseAuth != "" || assetAuth != "" || out.String() != "data" {
+		t.Fatalf("release auth=%q asset auth=%q data=%q", releaseAuth, assetAuth, out.String())
+	}
+}
+
 func TestGitHubTokenEnvironmentPrecedence(t *testing.T) {
 	t.Setenv("GH_TOKEN", " primary-token \n")
 	t.Setenv("GITHUB_TOKEN", "secondary-token")
 	got, err := githubToken(context.Background())
 	if err != nil || got != "primary-token" {
 		t.Fatalf("githubToken = %q, %v", got, err)
+	}
+}
+
+func TestGitHubTokenIsOptional(t *testing.T) {
+	t.Setenv("GH_TOKEN", "")
+	t.Setenv("GITHUB_TOKEN", "")
+	t.Setenv("PATH", t.TempDir())
+	got, err := githubToken(context.Background())
+	if err != nil || got != "" {
+		t.Fatalf("githubToken without auth = %q, %v", got, err)
 	}
 }
 
@@ -187,6 +231,35 @@ func TestAssetRedirectDoesNotForwardAuthorizationToAnotherHost(t *testing.T) {
 	}
 }
 
+func TestAssetRedirectNeverForwardsAuthorization(t *testing.T) {
+	var firstAuth, redirectedAuth string
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/asset":
+			firstAuth = r.Header.Get("Authorization")
+			http.Redirect(w, r, srv.URL+"/content", http.StatusFound)
+		case "/content":
+			redirectedAuth = r.Header.Get("Authorization")
+			io.WriteString(w, "data")
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	u := testUpdater(t, srv.URL)
+	var out strings.Builder
+	if err := u.download(context.Background(), releaseAsset{Name: "asset", URL: srv.URL + "/asset", Size: 4}, "very-secret", 10, &out); err != nil {
+		t.Fatal(err)
+	}
+	if firstAuth != "Bearer very-secret" {
+		t.Fatalf("initial Authorization = %q", firstAuth)
+	}
+	if redirectedAuth != "" {
+		t.Fatalf("Authorization leaked on same-origin redirect: %q", redirectedAuth)
+	}
+}
+
 func TestInstallAtomicSuccess(t *testing.T) {
 	old := []byte("old executable")
 	newBinary := []byte("#!/bin/sh\nprintf 'ktunnel v2.0.0\\n'\n")
@@ -237,6 +310,25 @@ func TestPostReplaceFailureRollsBack(t *testing.T) {
 	assertTargetAndNoUpdateFiles(t, target, old)
 }
 
+func TestConcurrentExplicitUpdateIsRejected(t *testing.T) {
+	old := []byte("old executable")
+	newBinary := []byte("#!/bin/sh\nprintf 'ktunnel v2.0.0\\n'\n")
+	u, rel, target, closeServer := updateFixture(t, old, newBinary, false)
+	defer closeServer()
+	lockPath := filepath.Join(filepath.Dir(target), ".ktunnel-update.lock")
+	if err := os.WriteFile(lockPath, []byte("active\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := u.install(context.Background(), rel, "token")
+	if err == nil || !strings.Contains(err.Error(), "진행 중") {
+		t.Fatalf("expected concurrent update rejection, got %v", err)
+	}
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	assertTargetAndNoUpdateFiles(t, target, old)
+}
+
 func TestChecksumMismatchLeavesExecutableUntouched(t *testing.T) {
 	old := []byte("old executable")
 	u, rel, target, closeServer := updateFixture(t, old, []byte("tampered"), true)
@@ -266,6 +358,9 @@ func assertTargetAndNoUpdateFiles(t *testing.T, target string, want []byte) {
 		if len(matches) != 0 {
 			t.Fatalf("files left behind: %v", matches)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(target), ".ktunnel-update.lock")); !os.IsNotExist(err) {
+		t.Fatalf("update lock left behind: %v", err)
 	}
 }
 

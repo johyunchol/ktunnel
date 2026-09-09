@@ -51,11 +51,13 @@ Failures are silent until the next daily check. Set `KTUNNEL_NO_UPDATE_CHECK=1`
 to disable it.
 
 `update` verifies the release SHA-256 before atomically replacing the current
-binary. Because this is a private repository, authenticate once with
-`gh auth login`, or provide `GH_TOKEN`/`GITHUB_TOKEN`; that GitHub account must
-have read access to the repository. The updater never stores the token and
-never invokes `sudo`. If the binary is installed in a protected directory,
-reinstall it under a user-writable directory such as
+binary. Public repository releases update without a login. When `GH_TOKEN`,
+`GITHUB_TOKEN`, or credentials from `gh auth login` are available, the updater
+uses them automatically for higher API limits. The built-in `ktunnel update`
+checks only the official `johyunchol/ktunnel` repository; it cannot be pointed
+at an arbitrary fork. The updater never stores the token and never invokes
+`sudo`. If the binary is installed in a protected directory, reinstall it under
+a user-writable directory such as
 `~/.local/bin`. For an installation made with `./install.sh --uv`, run that
 installer again so the wheel metadata and binary stay in sync. Windows users
 are directed to the exact release asset for a manual replacement because a
@@ -83,10 +85,14 @@ Binaries for macOS, Linux and Windows are attached to each
 ./install.sh --uv     # uv tool install, from the platform wheel
 ```
 
-The repository is private, so both go through the GitHub CLI (`gh auth login`).
-On Windows, download `ktunnel-windows-amd64.exe` and put it on your `PATH`.
-After a binary installation, subsequent releases can be installed with
-`ktunnel update` (or its `ktunnel upgrade` alias).
+Public releases are downloaded with `curl`, so neither a GitHub account nor
+`gh` is required. When an authenticated GitHub CLI is available, the installer
+uses it automatically. For a private fork, set `KTUNNEL_REPO=owner/repo` and
+run `gh auth login` with an account that has read access. Downloads are installed
+only after verification against `SHA256SUMS`. On Windows, download
+`ktunnel-windows-amd64.exe` and put it on
+your `PATH`. After a binary installation, subsequent releases can be installed
+with `ktunnel update` (or its `ktunnel upgrade` alias).
 
 ## For administrators
 
@@ -166,8 +172,10 @@ Go 1.25+, or Docker if you would rather not install Go:
 python3 packaging/build_wheels.py 0.5.0
 ```
 
-Tags trigger the same build in GitHub Actions and attach everything to a
-release.
+An exact stable-version tag such as `v0.5.0` triggers the same build in GitHub
+Actions and attaches everything to a release. The release workflow builds all
+binaries and wheels before creating one `SHA256SUMS`. Never reuse an older or
+locally generated checksum file that does not contain the wheel entries.
 
 ## License
 
