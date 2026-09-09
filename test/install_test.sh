@@ -33,4 +33,12 @@ for tag in latest 0.5.0 v1.2 v1.2.3.4 v01.2.3 v1.02.3 v1.2.03 v1.2.3-rc.1 v1.2.3
   fi
 done
 
+# The documented installer is executed through `curl | bash`. In that mode,
+# BASH_SOURCE[0] is unset under `set -u`, so exercise the exact stdin path.
+stdin_help="$(bash -u -s -- --help < "$ROOT/install.sh")"
+if [[ "$stdin_help" != *"usage: ./install.sh [--uv]"* ]]; then
+  echo "installer did not run correctly from stdin" >&2
+  exit 1
+fi
+
 echo "install.sh validation tests: OK"
