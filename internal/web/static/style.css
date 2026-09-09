@@ -18,6 +18,7 @@ code{background:var(--soft);padding:1px 5px;border-radius:4px;font-size:.9em}
 pre{background:#282520;color:#f0ebe3;padding:12px 14px;border-radius:8px;overflow-x:auto;font-size:13px;user-select:all}
 .card{background:#fff;border:1px solid var(--line);border-radius:10px;padding:18px 22px;margin:18px 0}
 .card.narrow{max-width:380px;margin:80px auto}.card.token{border-color:var(--accent);background:var(--soft)}
+.card.settings{max-width:440px}.card.settings label{margin-bottom:12px}
 .card h2:first-child{margin-top:0}
 .stats{display:flex;gap:14px;margin-bottom:8px}
 .stats div{flex:1;background:#fff;border:1px solid var(--line);border-radius:10px;padding:14px 18px}

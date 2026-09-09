@@ -1,0 +1,17 @@
+{{define "content"}}
+<h1>Settings</h1>
+<form method="post" action="/settings/password" class="card settings">
+  <h2>Change admin password</h2>
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <label>Current password
+    <input type="password" name="current_password" required autocomplete="current-password">
+  </label>
+  <label>New password
+    <input type="password" name="new_password" required minlength="8" autocomplete="new-password">
+  </label>
+  <label>Confirm new password
+    <input type="password" name="confirm_password" required minlength="8" autocomplete="new-password">
+  </label>
+  <button>Change password</button>
+</form>
+{{end}}

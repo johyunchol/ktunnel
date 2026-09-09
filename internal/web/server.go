@@ -50,9 +50,10 @@ type Server struct {
 	logger *log.Logger
 	pages  map[string]*template.Template
 
-	mu       sync.Mutex
-	sessions map[string]webSession
-	fails    map[string]loginFail
+	mu              sync.Mutex
+	sessions        map[string]webSession
+	fails           map[string]loginFail
+	passwordVersion uint64
 }
 
 func New(st *store.Store, logger *log.Logger) (*Server, error) {
@@ -61,7 +62,7 @@ func New(st *store.Store, logger *log.Logger) (*Server, error) {
 		"when": when,
 	}
 	pages := map[string]*template.Template{}
-	for _, name := range []string{"login", "index", "users", "user", "audit"} {
+	for _, name := range []string{"login", "index", "users", "user", "audit", "settings"} {
 		t, err := template.New("layout.html").Funcs(funcs).ParseFS(assets, "templates/layout.html", "templates/"+name+".html")
 		if err != nil {
 			return nil, fmt.Errorf("parse template %s: %w", name, err)
@@ -109,6 +110,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /reservations/{sub}/release", s.auth(s.reservationRelease))
 	mux.HandleFunc("POST /sessions/{id}/kill", s.auth(s.sessionKill))
 	mux.HandleFunc("GET /audit", s.auth(s.audit))
+	mux.HandleFunc("GET /settings", s.auth(s.settings))
+	mux.HandleFunc("POST /settings/password", s.auth(s.passwordChange))
 	return mux
 }
 
@@ -179,6 +182,7 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "login", map[string]any{
 		"Title":      "Sign in",
 		"NoPassword": hash == "",
+		"Msg":        r.URL.Query().Get("msg"),
 		"Error":      r.URL.Query().Get("error"),
 	})
 }
@@ -190,18 +194,24 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	hash, _ := s.st.Setting(settingPwdHash)
-	if hash == "" || bcrypt.CompareHashAndPassword([]byte(hash), []byte(r.FormValue("password"))) != nil {
-		s.logger.Printf("dashboard login failed from %s", ip)
-		http.Redirect(w, r, "/login?error="+url.QueryEscape("wrong password"), http.StatusSeeOther)
-		return
+	var id string
+	for {
+		s.mu.Lock()
+		hash, _ := s.st.Setting(settingPwdHash)
+		passwordVersion := s.passwordVersion
+		s.mu.Unlock()
+		if hash == "" || bcrypt.CompareHashAndPassword([]byte(hash), []byte(r.FormValue("password"))) != nil {
+			s.logger.Printf("dashboard login failed from %s", ip)
+			http.Redirect(w, r, "/login?error="+url.QueryEscape("wrong password"), http.StatusSeeOther)
+			return
+		}
+
+		id = randomHex(32)
+		if s.createSession(id, ip, passwordVersion) {
+			break
+		}
 	}
 
-	id := randomHex(32)
-	s.mu.Lock()
-	delete(s.fails, ip)
-	s.sessions[id] = webSession{expires: time.Now().Add(sessionTTL), csrf: randomHex(16)}
-	s.mu.Unlock()
 	// Strict, not Lax: every tunnel lives on a sibling subdomain, and to the
 	// browser evil.example.com and tunnel-admin.example.com are the same site.
 	http.SetCookie(w, &http.Cookie{
@@ -211,6 +221,17 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 	})
 	s.logger.Printf("dashboard login from %s", ip)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) createSession(id, ip string, passwordVersion uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if passwordVersion != s.passwordVersion {
+		return false
+	}
+	delete(s.fails, ip)
+	s.sessions[id] = webSession{expires: time.Now().Add(sessionTTL), csrf: randomHex(16)}
+	return true
 }
 
 func (s *Server) beginLoginAttempt(ip string, now time.Time) bool {
@@ -451,6 +472,38 @@ func (s *Server) audit(w http.ResponseWriter, r *http.Request) {
 	data := s.base(r, "Audit log")
 	data["Entries"], _ = s.st.AuditLog(200)
 	s.render(w, "audit", data)
+}
+
+func (s *Server) settings(w http.ResponseWriter, r *http.Request) {
+	s.render(w, "settings", s.base(r, "Settings"))
+}
+
+func (s *Server) passwordChange(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	hash, _ := s.st.Setting(settingPwdHash)
+	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(r.FormValue("current_password"))) != nil {
+		s.mu.Unlock()
+		redirectMsg(w, r, "/settings", "", fmt.Errorf("current password is incorrect"))
+		return
+	}
+	newPassword := r.FormValue("new_password")
+	if newPassword != r.FormValue("confirm_password") {
+		s.mu.Unlock()
+		redirectMsg(w, r, "/settings", "", fmt.Errorf("new passwords do not match"))
+		return
+	}
+	if err := SetAdminPassword(s.st, newPassword); err != nil {
+		s.mu.Unlock()
+		redirectMsg(w, r, "/settings", "", err)
+		return
+	}
+
+	s.st.Audit(0, "admin.password.change", "via dashboard")
+	s.passwordVersion++
+	s.sessions = map[string]webSession{}
+	s.mu.Unlock()
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1})
+	redirectMsg(w, r, "/login", "password changed - sign in again", nil)
 }
 
 // ---------- template helpers ----------
