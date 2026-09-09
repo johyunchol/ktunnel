@@ -417,6 +417,7 @@ func TestPassiveCacheTTLAndCorruption(t *testing.T) {
 }
 
 func TestPassiveCheckIsNonfatalAndDoesNotRepeatNetwork(t *testing.T) {
+	t.Setenv("CI", "")
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
@@ -435,6 +436,7 @@ func TestPassiveCheckIsNonfatalAndDoesNotRepeatNetwork(t *testing.T) {
 }
 
 func TestPassiveCheckPrintsOnlyForNewerRelease(t *testing.T) {
+	t.Setenv("CI", "")
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
