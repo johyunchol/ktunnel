@@ -185,26 +185,13 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 	ip := clientIP(r)
-	s.mu.Lock()
-	f := s.fails[ip]
-	if f.count >= maxLoginFails && time.Now().Before(f.until) {
-		s.mu.Unlock()
+	if !s.beginLoginAttempt(ip, time.Now()) {
 		http.Redirect(w, r, "/login?error="+url.QueryEscape("too many attempts - wait a minute"), http.StatusSeeOther)
 		return
 	}
-	s.mu.Unlock()
 
 	hash, _ := s.st.Setting(settingPwdHash)
 	if hash == "" || bcrypt.CompareHashAndPassword([]byte(hash), []byte(r.FormValue("password"))) != nil {
-		s.mu.Lock()
-		f = s.fails[ip]
-		f.count++
-		if f.count >= maxLoginFails {
-			f.until = time.Now().Add(loginLockout)
-			f.count = 0
-		}
-		s.fails[ip] = f
-		s.mu.Unlock()
 		s.logger.Printf("dashboard login failed from %s", ip)
 		http.Redirect(w, r, "/login?error="+url.QueryEscape("wrong password"), http.StatusSeeOther)
 		return
@@ -224,6 +211,26 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 	})
 	s.logger.Printf("dashboard login from %s", ip)
 	http.Redirect(w, r, "/", http.StatusSeeOther)
+}
+
+func (s *Server) beginLoginAttempt(ip string, now time.Time) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	f := s.fails[ip]
+	if f.count >= maxLoginFails {
+		if now.Before(f.until) {
+			return false
+		}
+		f = loginFail{}
+	}
+	f.count++
+	if f.count >= maxLoginFails {
+		f.until = now.Add(loginLockout)
+	}
+	s.fails[ip] = f
+
+	return true
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
