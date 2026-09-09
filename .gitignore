@@ -1,6 +1,10 @@
+# build output
+dist/
+ktunnel
+ktunnel.exe
+
 # local config may contain the auth token — never commit
 config
 *.token
 .env
 .DS_Store
-tmp/

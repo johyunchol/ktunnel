@@ -5,44 +5,43 @@ Expose a local port at `https://<name>.your-domain.com`, on your own hardware.
 ```console
 $ ktunnel http 3000
 
-  https://brave-otter-7f3a.kkensu.com
-  → 127.0.0.1:3000   (http, via docker)
+  https://happy-zephyr-0faf.kkensu.com
+  -> 127.0.0.1:3000   (http)
 
 Ctrl-C to stop.
 ```
 
 Same ergonomics as ngrok, except the relay is a box you own, the domain is
-yours, and nothing expires after two hours. It is a thin wrapper around
-[frp](https://github.com/fatedier/frp) — frp does the tunnelling, `ktunnel`
-removes the config file.
+yours, and nothing expires after two hours.
 
-## Why
-
-frp is solid but expects a TOML file per tunnel. That friction is enough to
-stop you reaching for it during a quick demo. `ktunnel` generates the config,
-picks a random subdomain, prints the URL, and cleans up on Ctrl-C.
+A single static binary. [frp](https://github.com/fatedier/frp) is embedded as a
+library, so there is nothing else to install — no Docker, no `frpc`, no runtime.
 
 ## Install
 
+Binaries for macOS, Linux and Windows are attached to each
+[release](../../releases).
+
 ```bash
-git clone git@github.com:kshsguy/ktunnel.git
-cd ktunnel && ./install.sh
+./install.sh          # picks the right binary for this machine
 ktunnel init
 ```
 
-Requires `frpc` or Docker on the client, and a
-[configured server](server/README.md).
+The repository is private, so `install.sh` uses the GitHub CLI (`gh auth login`)
+to authenticate. On Windows, download `ktunnel-windows-amd64.exe` from Releases
+and put it somewhere on your `PATH`.
 
 ## Usage
 
 ```bash
 ktunnel http 3000                      # random subdomain
 ktunnel http 3000 --name myapp         # https://myapp.example.com
-ktunnel http 3000 --open               # open a browser once connected
 ktunnel http 8080 --host 192.168.1.50  # forward to another machine on the LAN
 ktunnel tcp 22 --remote 16022          # raw TCP (ssh, databases, ...)
-ktunnel ls                             # what's currently running
+ktunnel http 3000 --verbose            # show frp client logs
 ```
+
+Flags may appear before or after the port.
 
 `tcp` tunnels need an explicit remote port: without HTTP's `Host` header there
 is nothing to route on, so each one occupies a port on the server.
@@ -56,7 +55,7 @@ The client dials **out** and the server reuses that connection in reverse:
                                                   |
                                           (existing connection)
                                                   v
-                                     [frpc] --> [localhost:3000]
+                                     [ktunnel] --> [localhost:3000]
 ```
 
 Nothing listens on the client. No inbound firewall rule, no port forwarding, no
@@ -70,7 +69,8 @@ what keeps you clear of Let's Encrypt rate limits.
 
 ## Configuration
 
-`~/.config/ktunnel/config`, created by `ktunnel init` and `chmod 600`:
+`~/.config/ktunnel/config` on macOS and Linux, `%AppData%\ktunnel\config` on
+Windows. Created by `ktunnel init`, written `0600`:
 
 ```bash
 SERVER_ADDR="nas.example.com"
@@ -80,14 +80,21 @@ TOKEN="..."
 ```
 
 The token authenticates you to frps. Anyone holding it can serve content under
-your domain, so treat it like a password. The control channel runs over TLS
-(`transport.tls.enable`).
+your domain, so treat it like a password. The control channel runs over TLS.
 
 ## Server
 
-See [server/README.md](server/README.md) — wildcard certificate via DNS-01,
+See [server/README.md](server/README.md) — the wildcard certificate via DNS-01,
 frps, and the nginx wildcard vhost, including the Synology DSM workaround for
 its reverse-proxy UI rejecting wildcard hostnames.
+
+## Building
+
+Requires Go 1.25+, or Docker if you would rather not install Go:
+
+```bash
+./build.sh v0.2.0     # cross-compiles into dist/ using the golang image
+```
 
 ## License
 
