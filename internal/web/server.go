@@ -2,7 +2,9 @@
 package web
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
@@ -29,7 +31,9 @@ var assets embed.FS
 
 const (
 	cookieName              = "__Host-ktunneld_session"
+	loginCSRFCookieName     = "__Host-ktunneld_login_csrf"
 	sessionTTL              = 12 * time.Hour
+	loginCSRFTTL            = 15 * time.Minute
 	maxWebSessions          = 1024
 	maxSessionsPerPrincipal = 16
 	maxWebRequestBody       = 64 << 10
@@ -78,6 +82,7 @@ type Server struct {
 	fails          map[string]loginFail
 	ipFails        map[string]loginFail
 	dummyHash      string
+	loginCSRFKey   [32]byte
 }
 
 // Config controls how the portal interprets externally visible request data.
@@ -119,7 +124,11 @@ func NewWithConfig(st *store.Store, logger *log.Logger, cfg Config) (*Server, er
 	if err != nil {
 		return nil, fmt.Errorf("prepare login verifier: %w", err)
 	}
-	return &Server{st: st, logger: logger, pages: pages, canonicalHost: canonicalHost, trustedProxies: trustedProxies, sessions: map[string]webSession{}, fails: map[string]loginFail{}, ipFails: map[string]loginFail{}, dummyHash: string(dummy)}, nil
+	var loginCSRFKey [32]byte
+	if _, err := rand.Read(loginCSRFKey[:]); err != nil {
+		return nil, fmt.Errorf("prepare login CSRF key: %w", err)
+	}
+	return &Server{st: st, logger: logger, pages: pages, canonicalHost: canonicalHost, trustedProxies: trustedProxies, sessions: map[string]webSession{}, fails: map[string]loginFail{}, ipFails: map[string]loginFail{}, dummyHash: string(dummy), loginCSRFKey: loginCSRFKey}, nil
 }
 
 func normalizeConfiguredHost(host string) (string, error) {
@@ -366,11 +375,23 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, to, http.StatusSeeOther)
 		return
 	}
+	now := time.Now()
+	loginCSRF, err := s.loginCSRFToken(r, now)
+	if err != nil {
+		http.Error(w, "로그인 페이지를 준비할 수 없습니다.", http.StatusInternalServerError)
+		return
+	}
+	if c, err := r.Cookie(loginCSRFCookieName); err != nil || c.Value != loginCSRF {
+		http.SetCookie(w, loginCSRFCookie(loginCSRF, now.Add(loginCSRFTTL)))
+	}
+	w.Header().Set("Cache-Control", "no-store")
 	h, _ := s.st.Setting(settingPwdHash)
-	s.render(w, "login", map[string]any{"Title": "로그인", "NoPassword": h == "", "Msg": r.URL.Query().Get("msg"), "Error": r.URL.Query().Get("error")})
+	s.render(w, "login", map[string]any{"Title": "로그인", "LoginCSRF": loginCSRF, "NoPassword": h == "", "Msg": r.URL.Query().Get("msg"), "Error": r.URL.Query().Get("error")})
 }
 func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
-	if !s.loginOriginAllowed(r) {
+	csrfOK := s.loginCSRFValid(r, time.Now())
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if !csrfOK || (origin != "null" && !s.loginOriginAllowed(r)) {
 		http.Error(w, "허용되지 않은 로그인 요청입니다.", http.StatusForbidden)
 		return
 	}
@@ -402,6 +423,7 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: id, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, Expires: time.Now().Add(sessionTTL)})
+	http.SetCookie(w, loginCSRFCookie("", time.Unix(1, 0)))
 	to := "/me"
 	if cred.isAdmin {
 		to = "/"
@@ -411,6 +433,64 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 	s.logger.Printf("web login for %s from %s", username, ip)
 	http.Redirect(w, r, to, http.StatusSeeOther)
 }
+
+func loginCSRFCookie(value string, expires time.Time) *http.Cookie {
+	maxAge := int(loginCSRFTTL / time.Second)
+	if value == "" {
+		maxAge = -1
+	}
+	return &http.Cookie{Name: loginCSRFCookieName, Value: value, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, Expires: expires, MaxAge: maxAge}
+}
+
+func (s *Server) loginCSRFToken(r *http.Request, now time.Time) (string, error) {
+	if c, err := r.Cookie(loginCSRFCookieName); err == nil && s.validLoginCSRFToken(c.Value, now) {
+		return c.Value, nil
+	}
+	nonce := make([]byte, 32)
+	if _, err := rand.Read(nonce); err != nil {
+		return "", err
+	}
+	expires := strconv.FormatInt(now.Add(loginCSRFTTL).Unix(), 10)
+	payload := expires + "." + hex.EncodeToString(nonce)
+	mac := hmac.New(sha256.New, s.loginCSRFKey[:])
+	_, _ = mac.Write([]byte(payload))
+	return payload + "." + hex.EncodeToString(mac.Sum(nil)), nil
+}
+
+func (s *Server) validLoginCSRFToken(token string, now time.Time) bool {
+	if len(token) == 0 || len(token) > 256 {
+		return false
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 || len(parts[1]) != 64 || len(parts[2]) != sha256.Size*2 {
+		return false
+	}
+	expiresUnix, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || now.After(time.Unix(expiresUnix, 0)) || time.Unix(expiresUnix, 0).After(now.Add(loginCSRFTTL)) {
+		return false
+	}
+	presentedMAC, err := hex.DecodeString(parts[2])
+	if err != nil {
+		return false
+	}
+	mac := hmac.New(sha256.New, s.loginCSRFKey[:])
+	_, _ = mac.Write([]byte(parts[0] + "." + parts[1]))
+	return hmac.Equal(presentedMAC, mac.Sum(nil))
+}
+
+func (s *Server) loginCSRFValid(r *http.Request, now time.Time) bool {
+	c, err := r.Cookie(loginCSRFCookieName)
+	if err != nil || !s.validLoginCSRFToken(c.Value, now) {
+		return false
+	}
+	formTokens := r.PostForm["login_csrf"]
+	if len(formTokens) != 1 || formTokens[0] == "" {
+		return false
+	}
+	formToken := formTokens[0]
+	return len(formToken) == len(c.Value) && subtle.ConstantTimeCompare([]byte(formToken), []byte(c.Value)) == 1
+}
+
 func (s *Server) loginOriginAllowed(r *http.Request) bool {
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" {

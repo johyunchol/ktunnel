@@ -54,13 +54,28 @@ func addWebUser(t *testing.T, s *Server, name, password string, must bool) *stor
 }
 func submitLogin(t *testing.T, s *Server, ip, user, password string) *httptest.ResponseRecorder {
 	t.Helper()
-	f := url.Values{"username": {user}, "password": {password}}
+	csrfCookie := issueLoginCSRF(t, s, "/login")
+	f := url.Values{"username": {user}, "password": {password}, "login_csrf": {csrfCookie.Value}}
 	r := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(f.Encode()))
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	r.RemoteAddr = ip + ":1234"
+	r.AddCookie(csrfCookie)
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
 	return w
+}
+func issueLoginCSRF(t *testing.T, s *Server, target string) *http.Cookie {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodGet, target, nil)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	for _, c := range w.Result().Cookies() {
+		if c.Name == loginCSRFCookieName {
+			return c
+		}
+	}
+	t.Fatalf("login GET did not issue CSRF cookie: status=%d body=%s", w.Code, w.Body.String())
+	return nil
 }
 func redirectError(t *testing.T, w *httptest.ResponseRecorder) string {
 	t.Helper()
@@ -73,14 +88,20 @@ func redirectError(t *testing.T, w *httptest.ResponseRecorder) string {
 func loginSession(t *testing.T, s *Server, user, password string) (*http.Cookie, webSession) {
 	t.Helper()
 	w := submitLogin(t, s, "192.0.2.1", user, password)
-	cs := w.Result().Cookies()
-	if len(cs) != 1 {
-		t.Fatalf("cookies=%d body=%s", len(cs), w.Body.String())
+	var sessionCookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == cookieName {
+			sessionCookie = c
+			break
+		}
+	}
+	if sessionCookie == nil {
+		t.Fatalf("session cookie missing: cookies=%v body=%s", w.Result().Cookies(), w.Body.String())
 	}
 	s.mu.Lock()
-	sess := s.sessions[cs[0].Value]
+	sess := s.sessions[sessionCookie.Value]
 	s.mu.Unlock()
-	return cs[0], sess
+	return sessionCookie, sess
 }
 func request(s *Server, method, path string, c *http.Cookie, form url.Values) *httptest.ResponseRecorder {
 	var body io.Reader
@@ -264,7 +285,8 @@ func TestSuccessfulLoginResetsOnlyItsOwnBucket(t *testing.T) {
 
 func TestLoginOriginGuard(t *testing.T) {
 	s := newTestServer(t, "admin-password")
-	form := url.Values{"username": {"admin"}, "password": {"admin-password"}}
+	csrfCookie := issueLoginCSRF(t, s, "http://example.com/login")
+	form := url.Values{"username": {"admin"}, "password": {"admin-password"}, "login_csrf": {csrfCookie.Value}}
 	for _, tc := range []struct {
 		name, origin string
 		want         int
@@ -276,6 +298,7 @@ func TestLoginOriginGuard(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, "http://example.com/login", strings.NewReader(form.Encode()))
 			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			r.AddCookie(csrfCookie)
 			if tc.origin != "" {
 				r.Header.Set("Origin", tc.origin)
 			}
@@ -283,6 +306,111 @@ func TestLoginOriginGuard(t *testing.T) {
 			s.Handler().ServeHTTP(w, r)
 			if w.Code != tc.want {
 				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestLoginCSRFCookieAndValidation(t *testing.T) {
+	s := newTestServer(t, "admin-password")
+	get := httptest.NewRequest(http.MethodGet, "https://example.com/login", nil)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, get)
+	var csrfCookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == loginCSRFCookieName {
+			csrfCookie = c
+			break
+		}
+	}
+	if csrfCookie == nil {
+		t.Fatal("GET /login did not issue login CSRF cookie")
+	}
+	if csrfCookie.Value == "" || csrfCookie.Path != "/" || csrfCookie.Domain != "" || !csrfCookie.Secure || !csrfCookie.HttpOnly || csrfCookie.SameSite != http.SameSiteStrictMode || csrfCookie.MaxAge != int(loginCSRFTTL/time.Second) {
+		t.Fatalf("unexpected login CSRF cookie: %#v", csrfCookie)
+	}
+	if !csrfCookie.Expires.After(time.Now()) || csrfCookie.Expires.After(time.Now().Add(loginCSRFTTL+time.Minute)) {
+		t.Fatalf("unexpected login CSRF expiry: %v", csrfCookie.Expires)
+	}
+	if !strings.Contains(w.Body.String(), `name="login_csrf" value="`+csrfCookie.Value+`"`) {
+		t.Fatal("login form does not contain the cookie's CSRF token")
+	}
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Fatalf("Cache-Control=%q", got)
+	}
+	back := httptest.NewRequest(http.MethodGet, "https://example.com/login", nil)
+	back.AddCookie(csrfCookie)
+	backW := httptest.NewRecorder()
+	s.Handler().ServeHTTP(backW, back)
+	if len(backW.Result().Cookies()) != 0 || !strings.Contains(backW.Body.String(), `value="`+csrfCookie.Value+`"`) {
+		t.Fatal("repeated login GET did not reuse the valid CSRF token")
+	}
+
+	post := func(origin string, cookie *http.Cookie, tokens []string, queryToken string) *httptest.ResponseRecorder {
+		t.Helper()
+		form := url.Values{"username": {"admin"}, "password": {"admin-password"}}
+		for _, token := range tokens {
+			form.Add("login_csrf", token)
+		}
+		target := "https://example.com/login"
+		if queryToken != "" {
+			target += "?login_csrf=" + url.QueryEscape(queryToken)
+		}
+		r := httptest.NewRequest(http.MethodPost, target, strings.NewReader(form.Encode()))
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if cookie != nil {
+			r.AddCookie(cookie)
+		}
+		result := httptest.NewRecorder()
+		s.Handler().ServeHTTP(result, r)
+		return result
+	}
+
+	otherCookie := issueLoginCSRF(t, s, "https://example.com/login")
+	invalid := []struct {
+		name, origin, query string
+		cookie              *http.Cookie
+		tokens              []string
+	}{
+		{"missing both", "null", "", nil, nil},
+		{"cookie only", "null", "", csrfCookie, nil},
+		{"form only", "null", "", nil, []string{csrfCookie.Value}},
+		{"mismatch", "null", "", csrfCookie, []string{otherCookie.Value}},
+		{"query only", "null", csrfCookie.Value, csrfCookie, nil},
+		{"duplicate body", "null", "", csrfCookie, []string{csrfCookie.Value, csrfCookie.Value}},
+		{"hostile origin with valid token", "https://evil.example", "", csrfCookie, []string{csrfCookie.Value}},
+	}
+	for _, tc := range invalid {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := post(tc.origin, tc.cookie, tc.tokens, tc.query); got.Code != http.StatusForbidden {
+				t.Fatalf("status=%d body=%s", got.Code, got.Body.String())
+			}
+		})
+	}
+	if len(s.sessions) != 0 || len(s.fails) != 0 || len(s.ipFails) != 0 {
+		t.Fatalf("invalid CSRF requests changed state: sessions=%d fails=%d ipFails=%d", len(s.sessions), len(s.fails), len(s.ipFails))
+	}
+	for _, tc := range []struct{ name, origin string }{
+		{"same origin", "https://example.com/"},
+		{"null origin", "null"},
+		{"origin omitted", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := post(tc.origin, csrfCookie, []string{csrfCookie.Value}, "")
+			if got.Code != http.StatusSeeOther {
+				t.Fatalf("status=%d body=%s", got.Code, got.Body.String())
+			}
+			var cleared bool
+			for _, c := range got.Result().Cookies() {
+				if c.Name == loginCSRFCookieName && c.MaxAge < 0 {
+					cleared = true
+				}
+			}
+			if !cleared {
+				t.Fatal("successful login did not clear login CSRF cookie")
 			}
 		})
 	}
@@ -313,10 +441,16 @@ func TestSessionCookieUsesHostPrefixAndProductionAttributes(t *testing.T) {
 	s := newTestServer(t, "admin-password")
 	w := submitLogin(t, s, "192.0.2.80", "admin", "admin-password")
 	cookies := w.Result().Cookies()
-	if len(cookies) != 1 {
-		t.Fatalf("cookies=%d", len(cookies))
+	var c *http.Cookie
+	for _, candidate := range cookies {
+		if candidate.Name == cookieName {
+			c = candidate
+			break
+		}
 	}
-	c := cookies[0]
+	if c == nil {
+		t.Fatalf("session cookie missing: cookies=%v", cookies)
+	}
 	if c.Name != "__Host-ktunneld_session" || c.Path != "/" || c.Domain != "" || !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode {
 		t.Fatalf("unsafe session cookie: %#v", c)
 	}
@@ -446,6 +580,8 @@ func TestCanonicalHostAndOriginFailClosed(t *testing.T) {
 	}
 
 	form := url.Values{"username": {"admin"}, "password": {"admin-password"}}
+	csrfCookie := issueLoginCSRF(t, s, "http://portal.example/login")
+	form.Set("login_csrf", csrfCookie.Value)
 	for _, tc := range []struct {
 		name, origin, forwardedProto string
 		want                         int
@@ -461,7 +597,7 @@ func TestCanonicalHostAndOriginFailClosed(t *testing.T) {
 		{"empty query marker", "https://portal.example/?", "https", http.StatusForbidden},
 		{"fragment", "https://portal.example/#login", "https", http.StatusForbidden},
 		{"userinfo", "https://user@portal.example/", "https", http.StatusForbidden},
-		{"opaque null origin", "null", "https", http.StatusForbidden},
+		{"opaque null origin with CSRF", "null", "https", http.StatusSeeOther},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, "http://portal.example/login", strings.NewReader(form.Encode()))
@@ -469,6 +605,7 @@ func TestCanonicalHostAndOriginFailClosed(t *testing.T) {
 			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 			r.Header.Set("Origin", tc.origin)
 			r.Header.Set("X-Forwarded-Proto", tc.forwardedProto)
+			r.AddCookie(csrfCookie)
 			w := httptest.NewRecorder()
 			s.Handler().ServeHTTP(w, r)
 			if w.Code != tc.want {
