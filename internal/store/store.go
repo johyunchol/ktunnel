@@ -650,6 +650,24 @@ func (s *Store) SubdomainInUse(subdomain string) (bool, error) {
 	return n > 0, err
 }
 
+// ActiveProxyHolder returns who currently serves a subdomain, if anyone.
+func (s *Store) ActiveProxyHolder(subdomain string) (userID, sessionID int64, ok bool, err error) {
+	err = s.db.QueryRow(`SELECT user_id, session_id FROM proxies WHERE subdomain = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1`,
+		subdomain).Scan(&userID, &sessionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, 0, false, nil
+	}
+	return userID, sessionID, err == nil, err
+}
+
+// EndProxiesForSubdomain closes every live proxy on a subdomain. Used when
+// the same user reconnects after an ungraceful drop and frps has not yet
+// reported the old proxy closed.
+func (s *Store) EndProxiesForSubdomain(subdomain string) error {
+	_, err := s.db.Exec(`UPDATE proxies SET ended_at = ? WHERE subdomain = ? AND ended_at IS NULL`, now(), subdomain)
+	return err
+}
+
 func (s *Store) ActiveProxies() ([]Proxy, error) {
 	rows, err := s.db.Query(`SELECT p.id, p.session_id, p.user_id, u.name, p.run_id, p.name, p.type, p.subdomain, p.remote_port, p.started_at
 		FROM proxies p JOIN users u ON u.id = p.user_id WHERE p.ended_at IS NULL ORDER BY p.started_at DESC`)

@@ -148,9 +148,17 @@ func secureRequest(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
+// clientIP is the key for login lockout. X-Real-IP is what the fronting
+// nginx block sets from $remote_addr and cannot be influenced by the client;
+// X-Forwarded-For's first hop can be, so it is only a fallback for proxies
+// that overwrite rather than append.
 func clientIP(r *http.Request) string {
+	if ip := strings.TrimSpace(r.Header.Get("X-Real-IP")); ip != "" {
+		return ip
+	}
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.TrimSpace(strings.Split(xff, ",")[0])
+		hops := strings.Split(xff, ",")
+		return strings.TrimSpace(hops[len(hops)-1])
 	}
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	return host
@@ -207,9 +215,11 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 	delete(s.fails, ip)
 	s.sessions[id] = webSession{expires: time.Now().Add(sessionTTL), csrf: randomHex(16)}
 	s.mu.Unlock()
+	// Strict, not Lax: every tunnel lives on a sibling subdomain, and to the
+	// browser evil.example.com and tunnel-admin.example.com are the same site.
 	http.SetCookie(w, &http.Cookie{
 		Name: cookieName, Value: id, Path: "/", HttpOnly: true,
-		Secure: secureRequest(r), SameSite: http.SameSiteLaxMode,
+		Secure: secureRequest(r), SameSite: http.SameSiteStrictMode,
 		Expires: time.Now().Add(sessionTTL),
 	})
 	s.logger.Printf("dashboard login from %s", ip)

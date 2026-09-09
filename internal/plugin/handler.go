@@ -210,8 +210,17 @@ func (h *Handler) newProxy(raw json.RawMessage) response {
 		if res, err := h.Store.Reservation(sub); err == nil && res.UserID != user.ID {
 			return reject(fmt.Sprintf("subdomain %q belongs to %s", sub, res.UserName))
 		}
-		if used, _ := h.Store.SubdomainInUse(sub); used {
-			return reject(fmt.Sprintf("subdomain %q is already in use", sub))
+		if holder, holderSess, held, _ := h.Store.ActiveProxyHolder(sub); held {
+			if holder != user.ID {
+				return reject(fmt.Sprintf("subdomain %q is already in use", sub))
+			}
+			// Same user, different session: a reconnect after an ungraceful
+			// drop, before frps reported the old proxy closed. Let the new
+			// session take over rather than refusing the user their own name.
+			if holderSess != sess.ID {
+				_ = h.Store.EndProxiesForSubdomain(sub)
+				h.logf("proxy takeover: user=%s %s (stale session %d)", user.Name, sub, holderSess)
+			}
 		}
 		c.SubDomain = sub
 	case "tcp":

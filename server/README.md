@@ -142,9 +142,15 @@ fails closed and refuses every login.
 
 ### Dashboard
 
-Give `127.0.0.1:7600` a hostname on your TLS proxy — on DSM this is an
-ordinary reverse-proxy entry (exact hostnames are fine there; only wildcards
-are refused) using the wildcard certificate. Sign in with the admin password.
+Give `127.0.0.1:7600` a hostname on your TLS proxy with
+[`nginx-dashboard.conf`](nginx-dashboard.conf) — on DSM, register it with
+`synow3tool` exactly like the wildcard block. Sign in with the admin password.
+
+Do not publish the dashboard through a tunnel: frps's vhost proxy rewrites
+`X-Forwarded-Proto` to `http`, so the session cookie would never be `Secure`,
+and the admin UI would go down with the very components it manages. The block
+also *overwrites* `X-Forwarded-For` — ktunneld keys its login lockout on
+`X-Real-IP`, and an appended header would let a client choose its own key.
 
 Sessions are cookie-based, `HttpOnly`, `SameSite=Lax`, and `Secure` when the
 proxy sets `X-Forwarded-Proto: https`. Five failed logins from one address
