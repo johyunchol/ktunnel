@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+# ktunnel — expose a local port at https://<name>.<domain>
+# A thin, opinionated wrapper around frp (https://github.com/fatedier/frp).
+set -euo pipefail
+
+VERSION="0.1.0"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/ktunnel"
+CONFIG_FILE="$CONFIG_DIR/config"
+FRPC_IMAGE="${KTUNNEL_FRPC_IMAGE:-snowdreamtech/frpc:latest}"
+
+# ---------- output helpers ----------
+if [[ -t 1 ]]; then
+  BOLD=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GREEN=$'\033[32m'
+  YELLOW=$'\033[33m'; CYAN=$'\033[36m'; RESET=$'\033[0m'
+else
+  BOLD=""; DIM=""; RED=""; GREEN=""; YELLOW=""; CYAN=""; RESET=""
+fi
+info()  { printf '%s\n' "$*"; }
+warn()  { printf '%s!%s %s\n' "$YELLOW" "$RESET" "$*" >&2; }
+die()   { printf '%serror:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
+
+# ---------- config ----------
+load_config() {
+  [[ -f "$CONFIG_FILE" ]] || die "not configured yet — run: ${BOLD}ktunnel init${RESET}"
+  # shellcheck disable=SC1090
+  source "$CONFIG_FILE"
+  : "${SERVER_ADDR:?SERVER_ADDR missing in $CONFIG_FILE}"
+  : "${SERVER_PORT:=7000}"
+  : "${TOKEN:?TOKEN missing in $CONFIG_FILE}"
+  : "${DOMAIN:?DOMAIN missing in $CONFIG_FILE}"
+}
+
+cmd_init() {
+  mkdir -p "$CONFIG_DIR"
+  info "${BOLD}ktunnel setup${RESET}"
+  info "${DIM}Values are stored in $CONFIG_FILE (chmod 600).${RESET}"
+  echo
+
+  local addr port domain token
+  read -r -p "frps server address [nas.example.com]: " addr
+  read -r -p "frps server port [7000]: " port
+  read -r -p "wildcard domain [example.com]: " domain
+  read -r -s -p "auth token (hidden): " token; echo
+
+  [[ -n "$addr"   ]] || die "server address is required"
+  [[ -n "$domain" ]] || die "domain is required"
+  [[ -n "$token"  ]] || die "token is required"
+
+  umask 077
+  cat > "$CONFIG_FILE" <<EOF
+# ktunnel configuration
+SERVER_ADDR="$addr"
+SERVER_PORT="${port:-7000}"
+DOMAIN="$domain"
+TOKEN="$token"
+EOF
+  chmod 600 "$CONFIG_FILE"
+  info "${GREEN}saved${RESET} → $CONFIG_FILE"
+  echo
+  info "Try it:  ${BOLD}ktunnel http 3000${RESET}"
+}
+
+# ---------- name generation ----------
+ADJECTIVES=(amber brave calm clever cosmic crimson eager fuzzy gentle golden
+            happy jolly lucky mellow neat noble quiet rapid silent swift tidy
+            vivid witty zesty bright frosty lunar solar)
+NOUNS=(otter falcon panda maple cedar comet ember harbor lantern meadow
+       nimbus orchid pebble quartz ripple summit thicket violet walrus zephyr
+       badger cobalt dolphin finch grove heron)
+
+random_name() {
+  local a n h
+  a="${ADJECTIVES[RANDOM % ${#ADJECTIVES[@]}]}"
+  n="${NOUNS[RANDOM % ${#NOUNS[@]}]}"
+  h=$(LC_ALL=C tr -dc 'a-f0-9' </dev/urandom | head -c 4)
+  printf '%s-%s-%s' "$a" "$n" "$h"
+}
+
+validate_name() {
+  [[ "$1" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] \
+    || die "invalid subdomain '$1' (use lowercase letters, digits, hyphens)"
+}
+
+# ---------- runtime detection ----------
+detect_runtime() {
+  if command -v frpc >/dev/null 2>&1; then echo native
+  elif command -v docker >/dev/null 2>&1; then echo docker
+  else die "neither 'frpc' nor 'docker' found — install one of them"; fi
+}
+
+# ---------- tunnel ----------
+cmd_http() {
+  local port="" name="" open=0 local_ip="127.0.0.1"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --name|-n)   name="${2:?--name needs a value}"; shift 2 ;;
+      --host)      local_ip="${2:?--host needs a value}"; shift 2 ;;
+      --open|-o)   open=1; shift ;;
+      -*)          die "unknown option: $1" ;;
+      *)           port="$1"; shift ;;
+    esac
+  done
+  [[ -n "$port" ]] || die "usage: ktunnel http <port> [--name NAME] [--open]"
+  [[ "$port" =~ ^[0-9]+$ ]] || die "port must be a number, got '$port'"
+
+  load_config
+  [[ -n "$name" ]] && validate_name "$name" || name="$(random_name)"
+
+  local url="https://${name}.${DOMAIN}"
+  run_tunnel "http" "$port" "$name" "" "$local_ip" "$url" "$open"
+}
+
+cmd_tcp() {
+  local port="" remote="" name="" local_ip="127.0.0.1"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --remote|-r) remote="${2:?--remote needs a value}"; shift 2 ;;
+      --name|-n)   name="${2:?--name needs a value}"; shift 2 ;;
+      --host)      local_ip="${2:?--host needs a value}"; shift 2 ;;
+      -*)          die "unknown option: $1" ;;
+      *)           port="$1"; shift ;;
+    esac
+  done
+  [[ -n "$port"   ]] || die "usage: ktunnel tcp <port> --remote <remote-port>"
+  [[ -n "$remote" ]] || die "--remote <remote-port> is required for tcp tunnels"
+
+  load_config
+  [[ -n "$name" ]] || name="tcp-$remote"
+  run_tunnel "tcp" "$port" "$name" "$remote" "$local_ip" "${SERVER_ADDR}:${remote}" 0
+}
+
+run_tunnel() {
+  local type="$1" port="$2" name="$3" remote="$4" local_ip="$5" url="$6" open="$7"
+  local runtime; runtime="$(detect_runtime)"
+  local tmp; tmp="$(mktemp -d "${TMPDIR:-/tmp}/ktunnel.XXXXXX")"
+  local cname="ktunnel-$name-$$"
+
+  cleanup() {
+    trap - EXIT INT TERM
+    [[ -n "${child:-}" ]] && kill "$child" 2>/dev/null || true
+    [[ "$runtime" == docker ]] && docker rm -f "$cname" >/dev/null 2>&1 || true
+    rm -rf "$tmp"
+    printf '\n%stunnel closed%s\n' "$DIM" "$RESET"
+  }
+  trap cleanup EXIT INT TERM
+
+  # frpc runs inside a container, so localhost must be redirected to the host
+  local effective_ip="$local_ip"
+  if [[ "$runtime" == docker && ( "$local_ip" == "127.0.0.1" || "$local_ip" == "localhost" ) ]]; then
+    effective_ip="host.docker.internal"
+  fi
+
+  {
+    printf 'serverAddr = "%s"\n' "$SERVER_ADDR"
+    printf 'serverPort = %s\n'   "$SERVER_PORT"
+    printf 'auth.token = "%s"\n' "$TOKEN"
+    printf 'transport.tls.enable = true\n'
+    printf 'loginFailExit = true\n\n'
+    printf '[[proxies]]\n'
+    printf 'name = "%s"\n'      "$name"
+    printf 'type = "%s"\n'      "$type"
+    printf 'localIP = "%s"\n'   "$effective_ip"
+    printf 'localPort = %s\n'   "$port"
+    if [[ "$type" == http ]]; then
+      printf 'subdomain = "%s"\n' "$name"
+    else
+      printf 'remotePort = %s\n'  "$remote"
+    fi
+  } > "$tmp/frpc.toml"
+  chmod 600 "$tmp/frpc.toml"
+
+  printf '\n  %s%s%s\n' "$BOLD$CYAN" "$url" "$RESET"
+  printf '  %s→ %s:%s   (%s, via %s)%s\n\n' \
+         "$DIM" "$local_ip" "$port" "$type" "$runtime" "$RESET"
+
+  if [[ "$open" == 1 ]] && command -v open >/dev/null 2>&1; then
+    ( sleep 3; open "$url" >/dev/null 2>&1 || true ) &
+  fi
+
+  info "${DIM}Ctrl-C to stop.${RESET}"
+
+  # Run in the background and wait: bash defers trap handlers until the current
+  # foreground command returns, which would leave the container orphaned on
+  # Ctrl-C. `wait` is interruptible, so the trap fires immediately.
+  local child
+  if [[ "$runtime" == native ]]; then
+    frpc -c "$tmp/frpc.toml" &
+  else
+    docker run --rm --name "$cname" \
+      --add-host=host.docker.internal:host-gateway \
+      -v "$tmp/frpc.toml:/etc/frp/frpc.toml:ro" \
+      "$FRPC_IMAGE" &
+  fi
+  child=$!
+  wait "$child" || true
+}
+
+cmd_ls() {
+  local found=0
+  if command -v docker >/dev/null 2>&1; then
+    while read -r line; do
+      [[ -n "$line" ]] || continue
+      found=1; printf '  %s\n' "$line"
+    done < <(docker ps --filter "name=ktunnel-" --format '{{.Names}}\t{{.Status}}' 2>/dev/null)
+  fi
+  while read -r pid cmd; do
+    [[ -n "${pid:-}" ]] || continue
+    found=1; printf '  pid %s  %s\n' "$pid" "$cmd"
+  done < <(pgrep -af 'frpc -c .*ktunnel' 2>/dev/null || true)
+  [[ "$found" == 1 ]] || info "${DIM}no tunnels running${RESET}"
+}
+
+usage() {
+  cat <<EOF
+${BOLD}ktunnel${RESET} $VERSION — expose a local port at https://<name>.<domain>
+
+${BOLD}USAGE${RESET}
+  ktunnel init                       configure server address, token, domain
+  ktunnel http <port> [options]      expose an HTTP service
+  ktunnel tcp  <port> --remote <n>   expose a raw TCP service
+  ktunnel ls                         list running tunnels
+  ktunnel version
+
+${BOLD}OPTIONS${RESET}
+  -n, --name <name>   fixed subdomain (default: random, e.g. brave-otter-7f3a)
+      --host <addr>   forward to another host instead of 127.0.0.1
+  -o, --open          open the URL in a browser once connected
+
+${BOLD}EXAMPLES${RESET}
+  ktunnel http 3000
+  ktunnel http 3000 --name myapp --open
+  ktunnel http 8080 --host 192.168.10.50
+  ktunnel tcp 22 --remote 16022
+
+${BOLD}CONFIG${RESET}
+  $CONFIG_FILE
+EOF
+}
+
+main() {
+  local cmd="${1:-}"; shift || true
+  case "$cmd" in
+    init)            cmd_init "$@" ;;
+    http)            cmd_http "$@" ;;
+    tcp)             cmd_tcp  "$@" ;;
+    ls|list|status)  cmd_ls   "$@" ;;
+    version|-v|--version) info "ktunnel $VERSION" ;;
+    ""|help|-h|--help)    usage ;;
+    *) die "unknown command '$cmd' — run 'ktunnel help'" ;;
+  esac
+}
+main "$@"

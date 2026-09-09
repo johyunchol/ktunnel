@@ -1,0 +1,15 @@
+# frps — tunnel server. Runs on the machine that owns the public IP.
+bindPort = 7000            # control channel (must be reachable from the internet)
+vhostHTTPPort = 18080      # plain HTTP; the TLS-terminating proxy forwards here
+subdomainHost = "example.com"
+
+auth.method = "token"
+auth.token = "REPLACE_ME"  # openssl rand -hex 32
+
+webServer.addr = "127.0.0.1"   # dashboard — keep bound to loopback
+webServer.port = 7500
+webServer.user = "admin"
+webServer.password = "REPLACE_ME"
+
+log.level = "info"
+log.maxDays = 7
