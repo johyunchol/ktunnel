@@ -24,11 +24,14 @@ const sessionStaleAfter = 120 * time.Second
 type Store struct{ db *sql.DB }
 
 type User struct {
-	ID         int64
-	Name       string
-	CreatedAt  time.Time
-	Disabled   bool
-	MaxTunnels int
+	ID                     int64
+	Name                   string
+	CreatedAt              time.Time
+	Disabled               bool
+	MaxTunnels             int
+	WebPasswordHash        string
+	PasswordChangeRequired bool
+	WebAuthVersion         int64
 }
 
 type Token struct {
@@ -100,7 +103,10 @@ CREATE TABLE IF NOT EXISTS users (
   name        TEXT NOT NULL UNIQUE,
   created_at  INTEGER NOT NULL,
   disabled    INTEGER NOT NULL DEFAULT 0,
-  max_tunnels INTEGER NOT NULL DEFAULT 5
+  max_tunnels INTEGER NOT NULL DEFAULT 5,
+  web_password_hash TEXT NOT NULL DEFAULT '',
+  password_change_required INTEGER NOT NULL DEFAULT 0,
+  web_auth_version INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS tokens (
   id           INTEGER PRIMARY KEY,
@@ -168,6 +174,9 @@ func Open(path string) (*Store, error) {
 	// Columns added after the first release; harmless when already present.
 	for _, stmt := range []string{
 		`ALTER TABLE tokens ADD COLUMN kicked_until INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN web_password_hash TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE users ADD COLUMN password_change_required INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE users ADD COLUMN web_auth_version INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()
@@ -203,6 +212,67 @@ func (s *Store) SetSetting(key, value string) error {
 	_, err := s.db.Exec(`INSERT INTO settings(key, value) VALUES(?, ?)
 	                     ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
 	return err
+}
+
+// SetAdminWebPassword atomically stores the legacy admin hash and advances
+// the durable web-auth version used to invalidate administrator sessions.
+func (s *Store) SetAdminWebPassword(hash string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`INSERT INTO settings(key, value) VALUES('admin_password_hash', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, hash); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO settings(key, value) VALUES('admin_web_auth_version', '1')
+		ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)`); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// AdminWebCredential reads the administrator hash and auth version together.
+func (s *Store) AdminWebCredential() (hash string, version int64, err error) {
+	var versionText string
+	err = s.db.QueryRow(`SELECT
+		COALESCE((SELECT value FROM settings WHERE key = 'admin_password_hash'), ''),
+		COALESCE((SELECT value FROM settings WHERE key = 'admin_web_auth_version'), '0')`).Scan(&hash, &versionText)
+	if err != nil {
+		return "", 0, err
+	}
+	version, err = strconv.ParseInt(versionText, 10, 64)
+	if err != nil || version < 0 {
+		return "", 0, fmt.Errorf("invalid admin web auth version %q", versionText)
+	}
+	return
+}
+
+// SetAdminWebPasswordIfVersion changes the administrator password only if no
+// CLI or other web request has changed it since the caller verified it.
+func (s *Store) SetAdminWebPasswordIfVersion(hash string, expectedVersion int64) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var current int64
+	if err = tx.QueryRow(`SELECT COALESCE(CAST((SELECT value FROM settings WHERE key = 'admin_web_auth_version') AS INTEGER), 0)`).Scan(&current); err != nil {
+		return false, err
+	}
+	if current != expectedVersion {
+		return false, nil
+	}
+	if _, err = tx.Exec(`INSERT INTO settings(key, value) VALUES('admin_password_hash', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, hash); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(`INSERT INTO settings(key, value) VALUES('admin_web_auth_version', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, strconv.FormatInt(expectedVersion+1, 10)); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // ServerInfo returns the relay details that get baked into new tokens.
@@ -248,13 +318,13 @@ func (s *Store) TCPPortRange() (lo, hi int) {
 
 // ---------- users ----------
 
-const userCols = `id, name, created_at, disabled, max_tunnels`
+const userCols = `id, name, created_at, disabled, max_tunnels, web_password_hash, password_change_required, web_auth_version`
 
 func scanUser(r interface{ Scan(...any) error }) (*User, error) {
 	var u User
 	var created int64
-	var disabled int
-	if err := r.Scan(&u.ID, &u.Name, &created, &disabled, &u.MaxTunnels); err != nil {
+	var disabled, changeRequired int
+	if err := r.Scan(&u.ID, &u.Name, &created, &disabled, &u.MaxTunnels, &u.WebPasswordHash, &changeRequired, &u.WebAuthVersion); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -262,6 +332,7 @@ func scanUser(r interface{ Scan(...any) error }) (*User, error) {
 	}
 	u.CreatedAt = time.Unix(created, 0)
 	u.Disabled = disabled == 1
+	u.PasswordChangeRequired = changeRequired == 1
 	return &u, nil
 }
 
@@ -269,6 +340,9 @@ func (s *Store) CreateUser(name string, maxTunnels int) (*User, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return nil, errors.New("user name is required")
+	}
+	if strings.EqualFold(name, "admin") {
+		return nil, errors.New("admin is a reserved user name")
 	}
 	if maxTunnels <= 0 {
 		maxTunnels = 5
@@ -311,8 +385,36 @@ func (s *Store) Users() ([]User, error) {
 }
 
 func (s *Store) SetUserDisabled(id int64, disabled bool) error {
-	_, err := s.db.Exec(`UPDATE users SET disabled = ? WHERE id = ?`, boolInt(disabled), id)
+	_, err := s.db.Exec(`UPDATE users SET disabled = ?, web_auth_version = web_auth_version + 1 WHERE id = ?`, boolInt(disabled), id)
 	return err
+}
+
+// SetUserWebPassword replaces a user's web credential. Tunnel tokens are not
+// affected. Incrementing web_auth_version invalidates that user's web sessions.
+func (s *Store) SetUserWebPassword(id int64, hash string, changeRequired bool) error {
+	res, err := s.db.Exec(`UPDATE users
+		SET web_password_hash = ?, password_change_required = ?, web_auth_version = web_auth_version + 1
+		WHERE id = ?`, hash, boolInt(changeRequired), id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SetUserWebPasswordIfVersion prevents a self-service password change from
+// overwriting an administrator reset that happened after credential checking.
+func (s *Store) SetUserWebPasswordIfVersion(id, expectedVersion int64, hash string, changeRequired bool) (bool, error) {
+	res, err := s.db.Exec(`UPDATE users
+		SET web_password_hash = ?, password_change_required = ?, web_auth_version = web_auth_version + 1
+		WHERE id = ? AND web_auth_version = ?`, hash, boolInt(changeRequired), id, expectedVersion)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 func (s *Store) SetUserMaxTunnels(id int64, n int) error {
@@ -456,9 +558,26 @@ func (s *Store) RevokeToken(id int64) error {
 	return err
 }
 
+// RevokeTokenForUser revokes a token only when it belongs to userID. The
+// ownership predicate is kept in SQL to prevent IDOR mistakes in callers.
+func (s *Store) RevokeTokenForUser(id, userID int64) error {
+	res, err := s.db.Exec(`UPDATE tokens SET revoked_at = ? WHERE id = ? AND user_id = ? AND revoked_at IS NULL`, now(), id, userID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	_, err = s.db.Exec(`UPDATE sessions SET killed = 1 WHERE token_id = ? AND user_id = ? AND ended_at IS NULL`, id, userID)
+	return err
+}
+
 // ---------- reservations ----------
 
 func (s *Store) Reserve(subdomain string, userID int64) error {
+	if strings.EqualFold(strings.TrimSpace(subdomain), "ktunnel") {
+		return errors.New("ktunnel is reserved for the web portal")
+	}
 	_, err := s.db.Exec(`INSERT INTO reservations(subdomain, user_id, created_at) VALUES(?, ?, ?)`,
 		strings.ToLower(strings.TrimSpace(subdomain)), userID, now())
 	if err != nil && strings.Contains(err.Error(), "UNIQUE") {

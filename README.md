@@ -95,10 +95,17 @@ ktunneld ls                                  # who is connected, what is exposed
 ktunneld kill <session-id | subdomain>       # disconnect; token refused for 5 min
 ```
 
-The **dashboard** (users, tokens, reservations, live tunnels, audit log) is the
-same thing with buttons. It listens on `127.0.0.1:7600`; put it behind your
-TLS-terminating proxy under a hostname of your choice and sign in with the
-password from `ktunneld admin set-password`.
+The **web portal** listens on `127.0.0.1:7600`. Administrators sign in as
+`admin` with the password from `ktunneld admin set-password`, create users, and
+hand each user the one-time temporary password shown after creation or reset.
+There is no public sign-up. On first sign-in users must change that password,
+then they can issue and revoke only their own tunnel tokens and view only their
+own connections and reserved addresses. A newly issued token is shown once;
+the user saves it with `ktunnel login <token>`.
+
+The production portal hostname is `https://ktunnel.kkensu.com`. Keep the old
+`tunnel-admin.kkensu.com` hostname as a permanent redirect; see
+[`server/nginx-dashboard.conf`](server/nginx-dashboard.conf).
 
 What is enforced on every tunnel:
 

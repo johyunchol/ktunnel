@@ -97,7 +97,7 @@ One static binary and one SQLite file. It listens on two loopback ports:
 | port | what | reachable from |
 |---|---|---|
 | `7601` | frps plugin hook (`POST /frp`) | frps only — never proxy this |
-| `7600` | dashboard | your TLS proxy, under a hostname you choose |
+| `7600` | administrator and user web portal | TLS proxy (`ktunnel.kkensu.com`) |
 
 Keeping the hook on a separate port is what stops the dashboard's public
 hostname from also exposing the authentication endpoint.
@@ -120,7 +120,7 @@ a DMZ every port in it is internet-facing.
 Then, through `docker exec ktunneld /app/ktunneld …`:
 
 ```bash
-ktunneld admin set-password            # dashboard login
+ktunneld admin set-password            # login as the fixed "admin" account
 ktunneld user add alice
 ktunneld token issue alice --label laptop
 ```
@@ -140,11 +140,18 @@ ops  = ["Login", "NewProxy", "Ping", "CloseProxy"]
 Start ktunneld **before** restarting frps: with the plugin unreachable, frps
 fails closed and refuses every login.
 
-### Dashboard
+### Web portal
 
-Give `127.0.0.1:7600` a hostname on your TLS proxy with
+Publish `127.0.0.1:7600` as `https://ktunnel.kkensu.com` with
 [`nginx-dashboard.conf`](nginx-dashboard.conf) — on DSM, register it with
-`synow3tool` exactly like the wildcard block. Sign in with the admin password.
+`synow3tool` exactly like the wildcard block. The example also sends the old
+`tunnel-admin.kkensu.com` hostname to the canonical URL with a 308 redirect.
+
+Sign in as `admin`, create a user, and securely deliver the temporary password
+shown once. Users sign in on the same page, must change the temporary password,
+and then issue their own one-time-display tunnel tokens. There is no sign-up.
+Existing users have no web password after migration until an administrator
+opens the user and issues one. Existing tunnel tokens continue to work.
 
 Do not publish the dashboard through a tunnel: frps's vhost proxy rewrites
 `X-Forwarded-Proto` to `http`, so the session cookie would never be `Secure`,

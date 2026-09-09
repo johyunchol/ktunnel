@@ -207,6 +207,9 @@ func (h *Handler) newProxy(raw json.RawMessage) response {
 		if !subdomainRe.MatchString(sub) {
 			return reject("invalid subdomain")
 		}
+		if sub == "ktunnel" {
+			return reject("subdomain \"ktunnel\" is reserved for the web portal")
+		}
 		if res, err := h.Store.Reservation(sub); err == nil && res.UserID != user.ID {
 			return reject(fmt.Sprintf("subdomain %q belongs to %s", sub, res.UserName))
 		}
