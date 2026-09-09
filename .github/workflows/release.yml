@@ -33,6 +33,11 @@ jobs:
           done
           cd dist && sha256sum * > SHA256SUMS
 
+      - name: Build wheels
+        run: |
+          python3 packaging/build_wheels.py "${GITHUB_REF_NAME#v}"
+          mv dist/wheels/*.whl dist/
+
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*

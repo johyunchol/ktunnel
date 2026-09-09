@@ -31,6 +31,27 @@ The repository is private, so `install.sh` uses the GitHub CLI (`gh auth login`)
 to authenticate. On Windows, download `ktunnel-windows-amd64.exe` from Releases
 and put it somewhere on your `PATH`.
 
+### With uv
+
+Each release also ships platform wheels, so `uv` can manage the binary — the
+same packaging trick ruff and uv themselves use. There is no Python wrapper in
+front of the binary; the wheel is only a delivery vehicle.
+
+```bash
+./install.sh --uv
+```
+
+Because the repository is private, GitHub will not serve release assets to an
+unauthenticated request, so a bare `uv tool install <url>` cannot work. The
+wheel is fetched with `gh` first and handed to `uv` as a local file:
+
+```bash
+gh release download --repo johyunchol/ktunnel --pattern '*macosx_11_0_arm64.whl'
+uv tool install --force ./ktunnel-*.whl
+```
+
+If the repository were public, `uv tool install <asset-url>` would work directly.
+
 ## Usage
 
 ```bash
