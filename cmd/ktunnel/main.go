@@ -36,24 +36,33 @@ func run(args []string) error {
 	cmd, rest := args[0], args[1:]
 	switch cmd {
 	case "login":
-		return cmdLogin(rest)
+		return runThenCheck(func() error { return cmdLogin(rest) })
 	case "logout":
-		return cmdLogout()
+		return runThenCheck(cmdLogout)
 	case "status", "whoami":
-		return cmdStatus()
+		return runThenCheck(cmdStatus)
 	case "http":
 		return cmdTunnel("http", rest)
 	case "tcp":
 		return cmdTunnel("tcp", rest)
+	case "update", "upgrade":
+		return cmdUpdate(rest)
 	case "version", "-v", "--version":
-		fmt.Printf("ktunnel %s\n", version)
-		return nil
+		return cmdVersion()
 	case "help", "-h", "--help":
 		usage()
 		return nil
 	default:
 		return fmt.Errorf("unknown command %q - run 'ktunnel help'", cmd)
 	}
+}
+
+func runThenCheck(fn func() error) error {
+	if err := fn(); err != nil {
+		return err
+	}
+	passiveUpdateCheck()
+	return nil
 }
 
 // cmdLogin stores a personal token. The token carries the relay address and
@@ -159,6 +168,9 @@ func cmdTunnel(kind string, args []string) error {
 
 	err = t.Run(ctx, cfg, *verbose, func() {
 		fmt.Println("live - Ctrl-C to stop.")
+		// Tunnel startup should never wait on GitHub. The check is best-effort
+		// and runs only once per day while this long-running command is alive.
+		go passiveUpdateCheck()
 	})
 	if ctx.Err() != nil { // cancelled by the user, not a failure
 		fmt.Println("\ntunnel closed")
@@ -202,6 +214,7 @@ USAGE
   ktunnel status                      show where you are logged in
   ktunnel logout
   ktunnel version
+  ktunnel update [--check]            install the latest release (alias: upgrade)
 
 OPTIONS
   -n, --name <name>   fixed subdomain (default: random, e.g. brave-otter-7f3a)
