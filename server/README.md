@@ -152,7 +152,7 @@ and the admin UI would go down with the very components it manages. The block
 also *overwrites* `X-Forwarded-For` — ktunneld keys its login lockout on
 `X-Real-IP`, and an appended header would let a client choose its own key.
 
-Sessions are cookie-based, `HttpOnly`, `SameSite=Lax`, and `Secure` when the
+Sessions are cookie-based, `HttpOnly`, `SameSite=Strict`, and `Secure` when the
 proxy sets `X-Forwarded-Proto: https`. Five failed logins from one address
 lock it out for a minute.
 
