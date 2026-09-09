@@ -451,8 +451,17 @@ func TestCanonicalHostAndOriginFailClosed(t *testing.T) {
 		want                         int
 	}{
 		{"canonical HTTPS", "https://portal.example", "https", http.StatusSeeOther},
+		{"canonical HTTPS trailing slash", "https://portal.example/", "https", http.StatusSeeOther},
+		{"canonical HTTPS explicit default port", "https://PORTAL.example:443/", "https", http.StatusSeeOther},
 		{"spoofed origin host", "https://evil.example", "https", http.StatusForbidden},
 		{"wrong origin scheme", "http://portal.example", "https", http.StatusForbidden},
+		{"nondefault port", "https://portal.example:444/", "https", http.StatusForbidden},
+		{"non-root path", "https://portal.example/login", "https", http.StatusForbidden},
+		{"query", "https://portal.example/?mobile=1", "https", http.StatusForbidden},
+		{"empty query marker", "https://portal.example/?", "https", http.StatusForbidden},
+		{"fragment", "https://portal.example/#login", "https", http.StatusForbidden},
+		{"userinfo", "https://user@portal.example/", "https", http.StatusForbidden},
+		{"opaque null origin", "null", "https", http.StatusForbidden},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := httptest.NewRequest(http.MethodPost, "http://portal.example/login", strings.NewReader(form.Encode()))

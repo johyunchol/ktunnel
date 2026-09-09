@@ -419,14 +419,36 @@ func (s *Server) loginOriginAllowed(r *http.Request) bool {
 		return true
 	}
 	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.ForceQuery || u.RawQuery != "" || u.Fragment != "" {
 		return false
 	}
 	wantHost := r.Host
 	if s.canonicalHost != "" {
 		wantHost = s.canonicalHost
 	}
-	return sameHost(u.Host, wantHost) && strings.EqualFold(u.Scheme, s.externalScheme(r))
+	wantScheme := s.externalScheme(r)
+	if !strings.EqualFold(u.Scheme, wantScheme) {
+		return false
+	}
+	want, err := url.Parse(wantScheme + "://" + wantHost)
+	if err != nil || want.Host == "" || want.User != nil {
+		return false
+	}
+	return sameHost(u.Hostname(), want.Hostname()) && effectiveOriginPort(u) == effectiveOriginPort(want)
+}
+
+func effectiveOriginPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 func sameHost(a, b string) bool {
