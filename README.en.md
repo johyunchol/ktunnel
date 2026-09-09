@@ -7,7 +7,7 @@ with per-user tokens, subdomain ownership and a dashboard, like a hosted tunnel
 service, except the relay is a box you own.
 
 ```console
-$ ktunnel login kt1.…        # once, with the token you were given
+$ ktunnel login              # enter the issued token at the hidden prompt
 $ ktunnel http 3000
 
   https://happy-zephyr-0faf.kkensu.com
@@ -30,10 +30,10 @@ no Docker, no `frpc`, no runtime.
 ## For users
 
 You need a token from whoever runs the relay. It carries the relay address and
-domain, so it is the only thing to paste:
+domain and verified TLS server name, so it is the only thing to paste:
 
 ```bash
-ktunnel login kt1.MTI3…      # stores it in ~/.config/ktunnel/config (0600)
+ktunnel login                          # enter the token without displaying it
 ktunnel http 3000                      # random subdomain
 ktunnel http 3000 --name myapp         # https://myapp.example.com
 ktunnel http 8080 --host 192.168.1.50  # forward to another machine on the LAN
@@ -43,6 +43,14 @@ ktunnel logout
 ktunnel update                         # install the latest release (upgrade also works)
 ktunnel update --check                 # check without installing
 ```
+
+`ktunnel login` hides token input on a terminal and is the recommended form.
+For automation that needs a pipe, use standard input, for example
+`printf '%s\n' "$KTUNNEL_TOKEN" | ktunnel login`. The explicit
+`ktunnel login <token>` form remains available for compatibility, but is not
+recommended interactively because the token may appear in shell history or a
+process listing. The config is stored at `~/.config/ktunnel/config`; on POSIX
+systems its directory is restricted to `0700` and its file to `0600`.
 
 Once a day, normal CLI use also checks for a newer stable release and prints a
 short notice when one is available. The best-effort check waits at most 750 ms
@@ -111,6 +119,12 @@ ktunnel ──login, metas.token──▶ frps ──Login/NewProxy/Ping/ClosePr
 There is **no shared frps secret** any more. Each token is personal, hashed at
 rest (sha256), shown exactly once, and revocable on its own.
 
+`kt2` tokens also carry the relay certificate name. The v0.6 client trusts only
+the embedded Let's Encrypt ISRG Root X1/X2 anchors and verifies both the
+certificate chain and host name on the frps control connection. Existing `kt1`
+tokens remain valid on the server during migration, but the v0.6 client refuses
+to open a new tunnel with one. Issue a new `kt2` token in the web portal.
+
 ```bash
 ktunneld user add alice --max 5              # concurrent-tunnel limit
 ktunneld token issue alice --label laptop    # prints the token once
@@ -130,7 +144,7 @@ hand each user the one-time temporary password shown after creation or reset.
 There is no public sign-up. On first sign-in users must change that password,
 then they can issue and revoke only their own tunnel tokens and view only their
 own connections and reserved addresses. A newly issued token is shown once;
-the user saves it with `ktunnel login <token>`.
+the user saves it through the hidden prompt from `ktunnel login`.
 
 The production portal hostname is `https://ktunnel.kkensu.com`. Keep the old
 `tunnel-admin.kkensu.com` hostname as a permanent redirect; see
@@ -159,20 +173,22 @@ The client dials **out** and the relay reuses that connection in reverse.
 Nothing listens on the client: no inbound rule, no port forwarding, no public
 IP — it works from a café, behind corporate NAT, on CGNAT, or tethered.
 
-TLS terminates at nginx with a wildcard certificate, so any subdomain is valid
-the moment you name it. No per-tunnel certificate issuance is what makes
-tunnel creation instant, and what keeps you clear of Let's Encrypt rate limits.
+Public web traffic terminates TLS at nginx with a wildcard certificate, so any
+subdomain is valid the moment you name it. Separately, the client-to-frps
+control channel requires TLS and verifies the relay certificate. No per-tunnel
+certificate issuance is what makes tunnel creation instant and keeps you clear
+of Let's Encrypt rate limits.
 
 ## Building
 
 Go 1.25+, or Docker if you would rather not install Go:
 
 ```bash
-./build.sh v0.5.0                    # cross-compiles both binaries into dist/
-python3 packaging/build_wheels.py 0.5.0
+./build.sh v0.6.0                    # cross-compiles both binaries into dist/
+python3 packaging/build_wheels.py 0.6.0
 ```
 
-An exact stable-version tag such as `v0.5.0` triggers the same build in GitHub
+An exact stable-version tag such as `v0.6.0` triggers the same build in GitHub
 Actions and attaches everything to a release. The release workflow builds all
 binaries and wheels before creating one `SHA256SUMS`. Never reuse an older or
 locally generated checksum file that does not contain the wheel entries.

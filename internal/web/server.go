@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"html/template"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/johyunchol/ktunnel/internal/store"
@@ -26,8 +28,12 @@ import (
 var assets embed.FS
 
 const (
-	cookieName              = "ktunneld_session"
+	cookieName              = "__Host-ktunneld_session"
 	sessionTTL              = 12 * time.Hour
+	maxWebSessions          = 1024
+	maxSessionsPerPrincipal = 16
+	maxWebRequestBody       = 64 << 10
+	maxLoginUsernameBytes   = 128
 	maxLoginFails           = 5
 	maxIPLoginAttempts      = 20
 	loginLockout            = 60 * time.Second
@@ -62,17 +68,44 @@ type loginFail struct {
 	lastSeen time.Time
 }
 type Server struct {
-	st        *store.Store
-	logger    *log.Logger
-	pages     map[string]*template.Template
-	mu        sync.Mutex
-	sessions  map[string]webSession
-	fails     map[string]loginFail
-	ipFails   map[string]loginFail
-	dummyHash string
+	st             *store.Store
+	logger         *log.Logger
+	pages          map[string]*template.Template
+	canonicalHost  string
+	trustedProxies []*net.IPNet
+	mu             sync.Mutex
+	sessions       map[string]webSession
+	fails          map[string]loginFail
+	ipFails        map[string]loginFail
+	dummyHash      string
+}
+
+// Config controls how the portal interprets externally visible request data.
+// CanonicalHost is optional for local development; production callers should
+// set it to the one hostname served by the TLS reverse proxy. Forwarded headers
+// are honored only when RemoteAddr belongs to TrustedProxyCIDRs.
+type Config struct {
+	CanonicalHost     string
+	TrustedProxyCIDRs []string
 }
 
 func New(st *store.Store, logger *log.Logger) (*Server, error) {
+	return NewWithConfig(st, logger, Config{TrustedProxyCIDRs: []string{"127.0.0.0/8", "::1/128"}})
+}
+
+func NewWithConfig(st *store.Store, logger *log.Logger, cfg Config) (*Server, error) {
+	canonicalHost, err := normalizeConfiguredHost(cfg.CanonicalHost)
+	if err != nil {
+		return nil, err
+	}
+	trustedProxies := make([]*net.IPNet, 0, len(cfg.TrustedProxyCIDRs))
+	for _, raw := range cfg.TrustedProxyCIDRs {
+		_, network, err := net.ParseCIDR(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, fmt.Errorf("parse trusted proxy CIDR %q: %w", raw, err)
+		}
+		trustedProxies = append(trustedProxies, network)
+	}
 	funcs := template.FuncMap{"ago": ago, "when": when, "initial": initial, "action": actionKorean, "hasPrefix": strings.HasPrefix}
 	pages := map[string]*template.Template{}
 	for _, name := range []string{"login", "index", "users", "user", "audit", "settings", "me", "account"} {
@@ -86,7 +119,22 @@ func New(st *store.Store, logger *log.Logger) (*Server, error) {
 	if err != nil {
 		return nil, fmt.Errorf("prepare login verifier: %w", err)
 	}
-	return &Server{st: st, logger: logger, pages: pages, sessions: map[string]webSession{}, fails: map[string]loginFail{}, ipFails: map[string]loginFail{}, dummyHash: string(dummy)}, nil
+	return &Server{st: st, logger: logger, pages: pages, canonicalHost: canonicalHost, trustedProxies: trustedProxies, sessions: map[string]webSession{}, fails: map[string]loginFail{}, ipFails: map[string]loginFail{}, dummyHash: string(dummy)}, nil
+}
+
+func normalizeConfiguredHost(host string) (string, error) {
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return "", nil
+	}
+	if strings.ContainsAny(host, "/\\@") {
+		return "", fmt.Errorf("canonical host must be a host name, optionally with a port")
+	}
+	u, err := url.Parse("//" + host)
+	if err != nil || u.Host != host || u.Hostname() == "" {
+		return "", fmt.Errorf("invalid canonical host %q", host)
+	}
+	return strings.ToLower(host), nil
 }
 
 func validPassword(password string) error {
@@ -143,7 +191,46 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /account", s.userOnly(s.account))
 	m.HandleFunc("POST /account/password", s.userOnly(s.userPasswordChange))
 	m.HandleFunc("/", s.notFound)
-	return m
+	return s.secureHeaders(s.requireCanonicalHost(s.limitRequestBody(m)))
+}
+
+func (s *Server) secureHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) requireCanonicalHost(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.canonicalHost != "" && !sameHost(r.Host, s.canonicalHost) {
+			http.Error(w, "요청한 호스트를 사용할 수 없습니다.", http.StatusMisdirectedRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) limitRequestBody(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			r.Body = http.MaxBytesReader(w, r.Body, maxWebRequestBody)
+			if err := r.ParseForm(); err != nil {
+				var tooLarge *http.MaxBytesError
+				if errors.As(err, &tooLarge) {
+					http.Error(w, "요청 본문이 너무 큽니다.", http.StatusRequestEntityTooLarge)
+				} else {
+					http.Error(w, "요청 본문을 읽을 수 없습니다.", http.StatusBadRequest)
+				}
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
@@ -209,18 +296,48 @@ func (s *Server) sessionCredentialCurrent(sess webSession) bool {
 	u, err := s.st.User(sess.userID)
 	return err == nil && !u.Disabled && u.WebPasswordHash != "" && u.WebAuthVersion == sess.authVersion
 }
-func secureRequest(r *http.Request) bool {
-	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
-}
-func clientIP(r *http.Request) string {
-	if ip := strings.TrimSpace(r.Header.Get("X-Real-IP")); ip != "" {
-		return ip
+func (s *Server) trustedProxy(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
 	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		h := strings.Split(xff, ",")
-		return strings.TrimSpace(h[len(h)-1])
+	ip := net.ParseIP(strings.TrimSpace(host))
+	if ip == nil {
+		return false
+	}
+	for _, network := range s.trustedProxies {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) externalScheme(r *http.Request) string {
+	if r.TLS != nil {
+		return "https"
+	}
+	if s.trustedProxy(r) {
+		switch strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))) {
+		case "https":
+			return "https"
+		case "http":
+			return "http"
+		}
+	}
+	return "http"
+}
+
+func (s *Server) clientIP(r *http.Request) string {
+	if s.trustedProxy(r) {
+		if ip := net.ParseIP(strings.TrimSpace(r.Header.Get("X-Real-IP"))); ip != nil {
+			return ip.String()
+		}
 	}
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if host == "" {
+		host = r.RemoteAddr
+	}
 	return host
 }
 func randomHex(n int) string    { b := make([]byte, n); _, _ = rand.Read(b); return hex.EncodeToString(b) }
@@ -253,12 +370,16 @@ func (s *Server) loginPage(w http.ResponseWriter, r *http.Request) {
 	s.render(w, "login", map[string]any{"Title": "로그인", "NoPassword": h == "", "Msg": r.URL.Query().Get("msg"), "Error": r.URL.Query().Get("error")})
 }
 func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
-	if !loginOriginAllowed(r) {
+	if !s.loginOriginAllowed(r) {
 		http.Error(w, "허용되지 않은 로그인 요청입니다.", http.StatusForbidden)
 		return
 	}
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	username := strings.TrimSpace(r.FormValue("username"))
+	if username == "" || len(username) > maxLoginUsernameBytes || strings.IndexFunc(username, unicode.IsControl) >= 0 {
+		redirectMsg(w, r, "/login", "", fmt.Errorf("아이디 또는 비밀번호가 올바르지 않습니다."))
+		return
+	}
 	lockKey := loginFailureKey(ip, username)
 	if !s.beginLoginAttempt(ip, username, time.Now()) {
 		redirectMsg(w, r, "/login", "", fmt.Errorf("로그인 시도가 너무 많습니다. 잠시 후 다시 시도해 주세요."))
@@ -277,10 +398,10 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	id := randomHex(32)
 	if !s.createSession(id, lockKey, cred) {
-		redirectMsg(w, r, "/login", "", fmt.Errorf("로그인 정보가 변경되었습니다. 다시 시도해 주세요."))
+		redirectMsg(w, r, "/login", "", fmt.Errorf("로그인 세션을 만들 수 없습니다. 잠시 후 다시 시도해 주세요."))
 		return
 	}
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: id, Path: "/", HttpOnly: true, Secure: secureRequest(r), SameSite: http.SameSiteStrictMode, Expires: time.Now().Add(sessionTTL)})
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: id, Path: "/", HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode, Expires: time.Now().Add(sessionTTL)})
 	to := "/me"
 	if cred.isAdmin {
 		to = "/"
@@ -290,7 +411,7 @@ func (s *Server) loginSubmit(w http.ResponseWriter, r *http.Request) {
 	s.logger.Printf("web login for %s from %s", username, ip)
 	http.Redirect(w, r, to, http.StatusSeeOther)
 }
-func loginOriginAllowed(r *http.Request) bool {
+func (s *Server) loginOriginAllowed(r *http.Request) bool {
 	origin := strings.TrimSpace(r.Header.Get("Origin"))
 	if origin == "" {
 		// Non-browser clients do not send Origin. Browser form submissions do,
@@ -298,14 +419,18 @@ func loginOriginAllowed(r *http.Request) bool {
 		return true
 	}
 	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" || !strings.EqualFold(u.Host, r.Host) {
+	if err != nil || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
 		return false
 	}
-	wantScheme := "http"
-	if secureRequest(r) {
-		wantScheme = "https"
+	wantHost := r.Host
+	if s.canonicalHost != "" {
+		wantHost = s.canonicalHost
 	}
-	return strings.EqualFold(u.Scheme, wantScheme)
+	return sameHost(u.Host, wantHost) && strings.EqualFold(u.Scheme, s.externalScheme(r))
+}
+
+func sameHost(a, b string) bool {
+	return strings.EqualFold(strings.TrimSuffix(a, "."), strings.TrimSuffix(b, "."))
 }
 func loginFailureKey(ip, username string) string {
 	return ip + "\x00" + strings.ToLower(strings.TrimSpace(username))
@@ -318,9 +443,37 @@ func (s *Server) createSession(id, lockKey string, cred credential) bool {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneSessionsLocked(time.Now())
+	var oldestPrincipalID string
+	var principalCount int
+	var oldestExpiry time.Time
+	for sessionID, sess := range s.sessions {
+		if sess.isAdmin != cred.isAdmin || (!cred.isAdmin && sess.userID != cred.userID) {
+			continue
+		}
+		principalCount++
+		if oldestPrincipalID == "" || sess.expires.Before(oldestExpiry) {
+			oldestPrincipalID = sessionID
+			oldestExpiry = sess.expires
+		}
+	}
+	if principalCount >= maxSessionsPerPrincipal {
+		delete(s.sessions, oldestPrincipalID)
+	}
+	if len(s.sessions) >= maxWebSessions {
+		return false
+	}
 	delete(s.fails, lockKey)
 	s.sessions[id] = webSession{expires: time.Now().Add(sessionTTL), csrf: randomHex(16), isAdmin: cred.isAdmin, userID: cred.userID, username: cred.username, authVersion: cred.authVersion, mustChange: cred.mustChange}
 	return true
+}
+
+func (s *Server) pruneSessionsLocked(now time.Time) {
+	for id, sess := range s.sessions {
+		if !now.Before(sess.expires) {
+			delete(s.sessions, id)
+		}
+	}
 }
 func (s *Server) beginLoginAttempt(ip, username string, now time.Time) bool {
 	s.mu.Lock()
@@ -373,7 +526,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, "/login", http.StatusSeeOther)
 }
 func clearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteStrictMode})
+	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1, Expires: time.Unix(1, 0), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode})
 }
 func (s *Server) invalidatePrincipal(isAdmin bool, userID int64) {
 	s.mu.Lock()

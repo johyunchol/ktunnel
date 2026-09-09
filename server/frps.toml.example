@@ -3,6 +3,14 @@ bindPort = 7000            # control channel (must be reachable from the interne
 vhostHTTPPort = 18080      # plain HTTP; the TLS-terminating proxy forwards here
 subdomainHost = "example.com"
 
+# The control channel is TLS-only. Use a full chain whose leaf certificate
+# covers the hostname encoded into kt2 tokens (normally relay.example.com).
+# Never commit the private key. The helper writes a combined 0600 PEM so the
+# certificate chain and matching key are replaced as one atomic file.
+transport.tls.force = true
+transport.tls.certFile = "/run/secrets/relay-tls.pem"
+transport.tls.keyFile = "/run/secrets/relay-tls.pem"
+
 # No auth.token on purpose: ktunneld authenticates each client with its own
 # personal token through the plugin hook below. Start ktunneld before frps —
 # with the hook unreachable frps fails closed and refuses every login.

@@ -7,7 +7,7 @@
 소유권, 대시보드를 제공하지만 중계 서버까지 직접 소유하고 운영합니다.
 
 ```console
-$ ktunnel login kt1.…        # 발급받은 토큰으로 최초 한 번 로그인
+$ ktunnel login              # 숨김 프롬프트에서 발급받은 토큰 입력
 $ ktunnel http 3000
 
   https://happy-zephyr-0faf.kkensu.com
@@ -30,10 +30,10 @@ live - Ctrl-C to stop.
 ## 사용자 안내
 
 중계 서버 운영자에게 토큰을 발급받아야 합니다. 토큰에 중계 서버 주소와
-도메인이 들어 있으므로 토큰 하나만 입력하면 됩니다.
+도메인과 검증할 TLS 서버 이름이 들어 있으므로 토큰 하나만 입력하면 됩니다.
 
 ```bash
-ktunnel login kt1.MTI3…      # ~/.config/ktunnel/config에 0600 권한으로 저장
+ktunnel login                          # 토큰을 화면에 표시하지 않고 입력
 ktunnel http 3000                      # 무작위 서브도메인
 ktunnel http 3000 --name myapp         # https://myapp.example.com
 ktunnel http 8080 --host 192.168.1.50  # LAN의 다른 장비로 전달
@@ -43,6 +43,13 @@ ktunnel logout
 ktunnel update                         # 최신 릴리스 설치(upgrade도 동일하게 동작)
 ktunnel update --check                 # 설치하지 않고 업데이트 확인
 ```
+
+`ktunnel login`은 터미널에서 토큰 입력을 숨기며 이것이 권장 방식입니다. 파이프가
+필요한 자동화에서는 `printf '%s\n' "$KTUNNEL_TOKEN" | ktunnel login`처럼 표준
+입력을 사용할 수 있습니다. `ktunnel login <token>`도 호환성을 위해 지원하지만
+토큰이 셸 기록이나 프로세스 목록에 노출될 수 있으므로 대화형 사용에는 권장하지
+않습니다. 설정은 `~/.config/ktunnel/config`에 저장되며 POSIX 시스템에서는
+디렉터리와 파일 권한이 각각 `0700`, `0600`으로 제한됩니다.
 
 일반 CLI 명령을 사용할 때 하루에 한 번 새로운 안정 버전이 있는지
 확인하고, 새 버전이 있으면 짧게 알려줍니다. 짧은 명령에서는 최대 750ms만
@@ -112,6 +119,12 @@ ktunnel ──login, metas.token──▶ frps ──Login/NewProxy/Ping/ClosePr
 저장 시 sha256으로 해시되며, 최초 발급 때 한 번만 표시되고 개별적으로
 폐기할 수 있습니다.
 
+`kt2` 토큰에는 중계 서버 인증서의 이름도 포함됩니다. v0.6 클라이언트는
+내장된 Let's Encrypt ISRG Root X1/X2만 신뢰하고 frps 제어 연결의 인증서와
+호스트 이름을 모두 검증합니다. 기존 `kt1` 토큰은 서버에서 마이그레이션
+기간 동안 유지되지만 v0.6 클라이언트로 새 터널을 열 수 없습니다. 웹 포털에서
+새 `kt2` 토큰을 발급받으세요.
+
 ```bash
 ktunneld user add alice --max 5              # 동시 터널 수 제한
 ktunneld token issue alice --label laptop    # 토큰을 한 번만 출력
@@ -131,7 +144,7 @@ ktunneld kill <session-id | subdomain>       # 연결 종료, 해당 토큰은 5
 이를 사용자에게 전달합니다. 공개 회원가입은 없습니다. 사용자는 처음
 로그인할 때 임시 비밀번호를 반드시 변경해야 하며, 이후 본인의 터널 토큰만
 발급·폐기하고 본인의 연결과 예약 주소만 볼 수 있습니다. 새 토큰은 한 번만
-표시되며 사용자는 `ktunnel login <token>`으로 저장합니다.
+표시되며 사용자는 `ktunnel login`의 숨김 프롬프트로 저장합니다.
 
 운영 포털 주소는 `https://ktunnel.kkensu.com`입니다. 기존
 `tunnel-admin.kkensu.com` 주소는 영구 리다이렉트로 유지합니다. 설정은
@@ -160,9 +173,11 @@ Synology DSM 우회 설정, `ktunneld` 구성을 다룹니다.
 포트 포워딩, 공인 IP가 필요 없습니다. 카페 Wi-Fi, 회사 NAT, CGNAT,
 테더링 환경에서도 동작합니다.
 
-TLS는 nginx에서 와일드카드 인증서로 종료됩니다. 따라서 서브도메인을 정하는
-즉시 유효한 HTTPS 주소가 됩니다. 터널마다 인증서를 별도로 발급하지 않으므로
-터널이 즉시 생성되고 Let's Encrypt 발급 제한도 피할 수 있습니다.
+공개 웹 트래픽의 TLS는 nginx에서 와일드카드 인증서로 종료됩니다. 따라서
+서브도메인을 정하는 즉시 유효한 HTTPS 주소가 됩니다. 이와 별도로 클라이언트와
+frps 사이의 제어 채널도 TLS를 강제하고 인증서를 검증합니다. 터널마다 인증서를
+별도로 발급하지 않으므로 터널이 즉시 생성되고 Let's Encrypt 발급 제한도
+피할 수 있습니다.
 
 ## 빌드
 
@@ -170,11 +185,11 @@ Go 1.25 이상이 필요합니다. Go를 직접 설치하지 않으려면 Docker
 있습니다.
 
 ```bash
-./build.sh v0.5.0                    # 두 바이너리를 dist/에 교차 컴파일
-python3 packaging/build_wheels.py 0.5.0
+./build.sh v0.6.0                    # 두 바이너리를 dist/에 교차 컴파일
+python3 packaging/build_wheels.py 0.6.0
 ```
 
-정확한 안정 버전 태그(예: `v0.5.0`)를 만들면 GitHub Actions가 같은 빌드를
+정확한 안정 버전 태그(예: `v0.6.0`)를 만들면 GitHub Actions가 같은 빌드를
 실행하고 모든 결과물을 릴리스에 첨부합니다. 릴리스 워크플로는 바이너리와
 wheel을 모두 만든 다음 하나의 `SHA256SUMS`를 생성합니다. wheel 항목이 없는
 이전 또는 로컬 체크섬 파일을 새 릴리스에 재사용해서는 안 됩니다.

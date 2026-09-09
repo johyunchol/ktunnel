@@ -19,6 +19,10 @@ import (
 )
 
 func newTestServer(t *testing.T, password string) *Server {
+	return newTestServerWithConfig(t, password, Config{TrustedProxyCIDRs: []string{"127.0.0.0/8", "::1/128"}})
+}
+
+func newTestServerWithConfig(t *testing.T, password string, cfg Config) *Server {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "ktunnel.db"))
 	if err != nil {
@@ -29,7 +33,7 @@ func newTestServer(t *testing.T, password string) *Server {
 	if err = st.SetSetting(settingPwdHash, string(h)); err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(st, log.New(io.Discard, "", 0))
+	s, err := NewWithConfig(st, log.New(io.Discard, "", 0), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,6 +109,19 @@ func TestAdminAndUserLogin(t *testing.T) {
 	w = submitLogin(t, s, "192.0.2.3", "alice", "alice-password")
 	if w.Header().Get("Location") != "/me" {
 		t.Fatalf("user redirect=%q", w.Header().Get("Location"))
+	}
+}
+
+func TestOversizedLoginUsernameDoesNotAllocateFailureEntry(t *testing.T) {
+	s := newTestServer(t, "admin-password")
+	w := submitLogin(t, s, "192.0.2.44", strings.Repeat("a", maxLoginUsernameBytes+1), "wrong")
+	if w.Code != http.StatusSeeOther || redirectError(t, w) == "" {
+		t.Fatalf("status=%d location=%q", w.Code, w.Header().Get("Location"))
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.fails) != 0 || len(s.ipFails) != 0 {
+		t.Fatalf("oversized username allocated lockout state: fails=%d ipFails=%d", len(s.fails), len(s.ipFails))
 	}
 }
 
@@ -262,6 +279,187 @@ func TestLoginOriginGuard(t *testing.T) {
 			if tc.origin != "" {
 				r.Header.Set("Origin", tc.origin)
 			}
+			w := httptest.NewRecorder()
+			s.Handler().ServeHTTP(w, r)
+			if w.Code != tc.want {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+func TestSecurityHeadersCoverSuccessRedirectAndErrors(t *testing.T) {
+	s := newTestServer(t, "admin-password")
+	wants := map[string]string{
+		"Content-Security-Policy": "frame-ancestors 'none'",
+		"X-Frame-Options":         "DENY",
+		"X-Content-Type-Options":  "nosniff",
+		"Referrer-Policy":         "no-referrer",
+		"Permissions-Policy":      "camera=()",
+	}
+	for _, path := range []string{"/login", "/", "/missing", "/static/style.css"} {
+		t.Run(path, func(t *testing.T) {
+			w := request(s, http.MethodGet, path, nil, nil)
+			for header, want := range wants {
+				if got := w.Header().Get(header); !strings.Contains(got, want) {
+					t.Errorf("%s=%q, want it to contain %q", header, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestSessionCookieUsesHostPrefixAndProductionAttributes(t *testing.T) {
+	s := newTestServer(t, "admin-password")
+	w := submitLogin(t, s, "192.0.2.80", "admin", "admin-password")
+	cookies := w.Result().Cookies()
+	if len(cookies) != 1 {
+		t.Fatalf("cookies=%d", len(cookies))
+	}
+	c := cookies[0]
+	if c.Name != "__Host-ktunneld_session" || c.Path != "/" || c.Domain != "" || !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode {
+		t.Fatalf("unsafe session cookie: %#v", c)
+	}
+
+	clear := httptest.NewRecorder()
+	clearSessionCookie(clear)
+	deleted := clear.Result().Cookies()[0]
+	if deleted.Name != cookieName || deleted.Path != "/" || deleted.Domain != "" || !deleted.HttpOnly || !deleted.Secure || deleted.SameSite != http.SameSiteStrictMode || deleted.MaxAge >= 0 {
+		t.Fatalf("unsafe cookie deletion: %#v", deleted)
+	}
+}
+
+func TestForwardedHeadersRequireTrustedProxy(t *testing.T) {
+	s := newTestServer(t, "admin-password")
+	untrusted := httptest.NewRequest(http.MethodPost, "http://portal.example/login", nil)
+	untrusted.RemoteAddr = "192.0.2.90:1234"
+	untrusted.Header.Set("X-Real-IP", "203.0.113.1")
+	untrusted.Header.Set("X-Forwarded-Proto", "https")
+	if got := s.clientIP(untrusted); got != "192.0.2.90" {
+		t.Fatalf("untrusted client IP=%q", got)
+	}
+	if got := s.externalScheme(untrusted); got != "http" {
+		t.Fatalf("untrusted external scheme=%q", got)
+	}
+	untrusted.Header.Set("Origin", "https://portal.example")
+	if s.loginOriginAllowed(untrusted) {
+		t.Fatal("untrusted X-Forwarded-Proto made a spoofed HTTPS origin valid")
+	}
+
+	trusted := httptest.NewRequest(http.MethodPost, "http://portal.example/login", nil)
+	trusted.RemoteAddr = "127.0.0.1:1234"
+	trusted.Header.Set("X-Real-IP", "203.0.113.2")
+	trusted.Header.Set("X-Forwarded-Proto", "https")
+	if got := s.clientIP(trusted); got != "203.0.113.2" {
+		t.Fatalf("trusted client IP=%q", got)
+	}
+	if got := s.externalScheme(trusted); got != "https" {
+		t.Fatalf("trusted external scheme=%q", got)
+	}
+}
+
+func TestInvalidWebSecurityConfigIsRejected(t *testing.T) {
+	for _, cfg := range []Config{
+		{CanonicalHost: "https://portal.example"},
+		{TrustedProxyCIDRs: []string{"not-a-network"}},
+	} {
+		st, err := store.Open(filepath.Join(t.TempDir(), "ktunnel.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = NewWithConfig(st, log.New(io.Discard, "", 0), cfg); err == nil {
+			_ = st.Close()
+			t.Fatalf("accepted invalid config: %#v", cfg)
+		}
+		_ = st.Close()
+	}
+}
+
+func TestOversizedWebPostIsRejectedBeforeHandler(t *testing.T) {
+	s := newTestServer(t, "admin-password")
+	body := "username=admin&password=" + strings.Repeat("x", maxWebRequestBody)
+	r := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(body))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	if len(s.sessions) != 0 || len(s.fails) != 0 {
+		t.Fatalf("oversized request reached login handler: sessions=%d failures=%d", len(s.sessions), len(s.fails))
+	}
+}
+
+func TestSessionCreationPrunesExpiredAndCapsPrincipal(t *testing.T) {
+	s := newTestServer(t, "admin-password")
+	cred := s.credentialForUsername("admin")
+	now := time.Now()
+	s.sessions["expired"] = webSession{expires: now.Add(-time.Second)}
+	for i := 0; i < maxSessionsPerPrincipal; i++ {
+		s.sessions[fmt.Sprintf("existing-%d", i)] = webSession{isAdmin: true, expires: now.Add(time.Duration(i+1) * time.Minute)}
+	}
+	if !s.createSession("new", "lock", cred) {
+		t.Fatal("valid credential did not create session")
+	}
+	if _, ok := s.sessions["expired"]; ok {
+		t.Fatal("expired session was not pruned")
+	}
+	if _, ok := s.sessions["existing-0"]; ok {
+		t.Fatal("oldest live session was not evicted at capacity")
+	}
+	if _, ok := s.sessions["new"]; !ok {
+		t.Fatal("new session missing")
+	}
+	if len(s.sessions) != maxSessionsPerPrincipal {
+		t.Fatalf("sessions=%d, want %d", len(s.sessions), maxSessionsPerPrincipal)
+	}
+}
+
+func TestGlobalSessionCapDoesNotEvictAnotherPrincipal(t *testing.T) {
+	s := newTestServer(t, "admin-password")
+	cred := s.credentialForUsername("admin")
+	for i := 0; i < maxWebSessions; i++ {
+		s.sessions[fmt.Sprintf("user-%d", i)] = webSession{userID: int64(i + 1), expires: time.Now().Add(time.Hour)}
+	}
+	if s.createSession("admin", "lock", cred) {
+		t.Fatal("session created beyond global cap")
+	}
+	if len(s.sessions) != maxWebSessions {
+		t.Fatalf("sessions=%d, want %d", len(s.sessions), maxWebSessions)
+	}
+	if _, ok := s.sessions["user-0"]; !ok {
+		t.Fatal("another principal's session was evicted")
+	}
+}
+
+func TestCanonicalHostAndOriginFailClosed(t *testing.T) {
+	s := newTestServerWithConfig(t, "admin-password", Config{
+		CanonicalHost:     "portal.example",
+		TrustedProxyCIDRs: []string{"127.0.0.0/8"},
+	})
+
+	badHost := httptest.NewRequest(http.MethodGet, "http://evil.example/login", nil)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, badHost)
+	if w.Code != http.StatusMisdirectedRequest {
+		t.Fatalf("bad host status=%d", w.Code)
+	}
+
+	form := url.Values{"username": {"admin"}, "password": {"admin-password"}}
+	for _, tc := range []struct {
+		name, origin, forwardedProto string
+		want                         int
+	}{
+		{"canonical HTTPS", "https://portal.example", "https", http.StatusSeeOther},
+		{"spoofed origin host", "https://evil.example", "https", http.StatusForbidden},
+		{"wrong origin scheme", "http://portal.example", "https", http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "http://portal.example/login", strings.NewReader(form.Encode()))
+			r.RemoteAddr = "127.0.0.1:1234"
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			r.Header.Set("Origin", tc.origin)
+			r.Header.Set("X-Forwarded-Proto", tc.forwardedProto)
 			w := httptest.NewRecorder()
 			s.Handler().ServeHTTP(w, r)
 			if w.Code != tc.want {

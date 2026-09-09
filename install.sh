@@ -155,7 +155,7 @@ case ":$PATH:" in
      echo "  echo 'export PATH=\"$PREFIX:\$PATH\"' >> ~/.zshrc && exec zsh" ;;
 esac
 echo
-echo "Next:  ktunnel login <token>"
+echo "Next:  ktunnel login"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then

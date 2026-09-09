@@ -23,6 +23,18 @@ jobs:
             exit 1
           fi
 
+      - name: Test
+        env:
+          GOTOOLCHAIN: auto
+        run: |
+          go test ./...
+          go test -race ./...
+          go vet ./...
+          bash -n install.sh server/*.sh test/*.sh
+          ./test/install_test.sh
+          ./server/fetch-frps_test.sh
+          ./server/reload-cert_test.sh
+
       - name: Build
         env:
           CGO_ENABLED: '0'

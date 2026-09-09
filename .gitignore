@@ -17,6 +17,8 @@ config
 # real relay configuration (keep the documented example)
 server/frps.toml
 !server/frps.toml.example
+server/frps
+server/.frps.tmp.*
 
 # certificates and private keys
 *.pem
@@ -29,6 +31,9 @@ server/frps.toml
 *.p12
 *.pfx
 *.jks
+!cmd/ktunnel/assets/isrg-root-x1.pem
+!cmd/ktunnel/assets/isrg-root-x2.pem
+!server/isrg-root-bundle.pem
 
 # sqlite state
 *.db

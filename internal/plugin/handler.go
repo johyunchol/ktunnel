@@ -8,12 +8,14 @@ package plugin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/johyunchol/ktunnel/internal/store"
 )
@@ -22,6 +24,21 @@ const (
 	metaToken   = "token"           // set by the client: the personal token
 	metaSession = "ktunnel_session" // set by us at Login, echoed by frps afterwards
 	metaUser    = "ktunnel_user"
+
+	maxTopLevelFields  = 64
+	maxMetaEntries     = 32
+	maxMetaBytes       = 16 << 10
+	maxMetaKeyBytes    = 64
+	maxMetaValueBytes  = 8 << 10
+	maxTokenBytes      = 8 << 10
+	maxUserBytes       = 256
+	maxRunIDBytes      = 256
+	maxProxyNameBytes  = 256
+	maxProxyTypeBytes  = 32
+	maxHostnameBytes   = 255
+	maxOSBytes         = 64
+	maxArchBytes       = 64
+	maxClientAddrBytes = 255
 )
 
 var subdomainRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
@@ -80,6 +97,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	if !boundedText(req.Version, 32, true) || !boundedText(req.Op, 32, false) {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
 
 	var resp response
 	switch req.Op {
@@ -103,24 +124,72 @@ func reject(reason string) response {
 	return response{Reject: true, RejectReason: reason}
 }
 
+func boundedText(s string, max int, allowEmpty bool) bool {
+	if (!allowEmpty && s == "") || len(s) > max {
+		return false
+	}
+	return strings.IndexFunc(s, unicode.IsControl) < 0
+}
+
+func validUserInfo(u userInfo) bool {
+	if !boundedText(u.User, maxUserBytes, true) || !boundedText(u.RunID, maxRunIDBytes, true) || len(u.Metas) > maxMetaEntries {
+		return false
+	}
+	total := 0
+	for key, value := range u.Metas {
+		if !boundedText(key, maxMetaKeyBytes, false) || !boundedText(value, maxMetaValueBytes, true) {
+			return false
+		}
+		total += len(key) + len(value)
+		if total > maxMetaBytes {
+			return false
+		}
+	}
+	return true
+}
+
 // login authenticates the personal token and rewrites the login so that frps
 // sees the resolved user name and our session id on every later operation.
 func (h *Handler) login(raw json.RawMessage, r *http.Request) response {
 	var content map[string]any
-	if err := json.Unmarshal(raw, &content); err != nil {
+	if err := json.Unmarshal(raw, &content); err != nil || len(content) > maxTopLevelFields {
 		return reject("malformed login")
+	}
+	for key, limit := range map[string]int{
+		"hostname": maxHostnameBytes, "os": maxOSBytes, "arch": maxArchBytes, "client_address": maxClientAddrBytes,
+	} {
+		if value, exists := content[key]; exists {
+			text, ok := value.(string)
+			if !ok || !boundedText(text, limit, true) {
+				return reject("invalid login metadata")
+			}
+		}
 	}
 	metas := map[string]string{}
 	if m, ok := content["metas"].(map[string]any); ok {
+		if len(m) > maxMetaEntries {
+			return reject("invalid login metadata")
+		}
+		total := 0
 		for k, v := range m {
 			if s, ok := v.(string); ok {
+				if !boundedText(k, maxMetaKeyBytes, false) || !boundedText(s, maxMetaValueBytes, true) {
+					return reject("invalid login metadata")
+				}
+				total += len(k) + len(s)
+				if total > maxMetaBytes {
+					return reject("invalid login metadata")
+				}
 				metas[k] = s
 			}
 		}
 	}
 	token := metas[metaToken]
 	if token == "" {
-		return reject("no token presented - run: ktunnel login <token>")
+		return reject("no token presented - run: ktunnel login")
+	}
+	if !boundedText(token, maxTokenBytes, false) {
+		return reject("invalid token")
 	}
 
 	tok, user, err := h.Store.Authenticate(token)
@@ -184,19 +253,15 @@ func (h *Handler) newProxy(raw json.RawMessage) response {
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return reject("malformed proxy request")
 	}
+	if !validUserInfo(c.User) || !boundedText(c.ProxyName, maxProxyNameBytes, false) ||
+		!boundedText(c.ProxyType, maxProxyTypeBytes, false) || !boundedText(c.SubDomain, 63, true) {
+		return reject("invalid proxy request")
+	}
 	sess, why := h.session(c.User)
 	if sess == nil {
 		return reject(why)
 	}
 	_ = h.Store.TouchSession(sess.ID, c.User.RunID)
-
-	user, err := h.Store.User(sess.UserID)
-	if err != nil {
-		return reject("server error")
-	}
-	if n, _ := h.Store.CountActiveProxies(user.ID); n >= user.MaxTunnels {
-		return reject(fmt.Sprintf("tunnel limit reached (%d)", user.MaxTunnels))
-	}
 
 	switch c.ProxyType {
 	case "http":
@@ -210,47 +275,40 @@ func (h *Handler) newProxy(raw json.RawMessage) response {
 		if sub == "ktunnel" {
 			return reject("subdomain \"ktunnel\" is reserved for the web portal")
 		}
-		if res, err := h.Store.Reservation(sub); err == nil && res.UserID != user.ID {
-			return reject(fmt.Sprintf("subdomain %q belongs to %s", sub, res.UserName))
-		}
-		if holder, holderSess, held, _ := h.Store.ActiveProxyHolder(sub); held {
-			if holder != user.ID {
-				return reject(fmt.Sprintf("subdomain %q is already in use", sub))
-			}
-			// Same user, different session: a reconnect after an ungraceful
-			// drop, before frps reported the old proxy closed. Let the new
-			// session take over rather than refusing the user their own name.
-			if holderSess != sess.ID {
-				_ = h.Store.EndProxiesForSubdomain(sub)
-				h.logf("proxy takeover: user=%s %s (stale session %d)", user.Name, sub, holderSess)
-			}
-		}
 		c.SubDomain = sub
 	case "tcp":
-		lo, hi := h.Store.TCPPortRange()
-		if c.RemotePort < lo || c.RemotePort > hi {
-			return reject(fmt.Sprintf("remote port must be between %d and %d", lo, hi))
-		}
 	default:
 		return reject(fmt.Sprintf("proxy type %q is not allowed", c.ProxyType))
 	}
 
-	if err := h.Store.AddProxy(sess.ID, user.ID, c.User.RunID, c.ProxyName, c.ProxyType, c.SubDomain, c.RemotePort); err != nil {
+	admission, err := h.Store.AdmitProxy(sess.ID, c.User.RunID, c.ProxyName, c.ProxyType, c.SubDomain, c.RemotePort)
+	if err != nil {
+		var denied *store.ProxyDeniedError
+		if errors.As(err, &denied) {
+			return reject(denied.Reason)
+		}
 		h.logf("add proxy: %v", err)
 		return reject("server error")
+	}
+	if admission.TakeoverSessionID != 0 {
+		target := c.SubDomain
+		if c.ProxyType == "tcp" {
+			target = ":" + strconv.Itoa(c.RemotePort)
+		}
+		h.logf("proxy takeover: user=%s %s (stale session %d)", sess.UserName, target, admission.TakeoverSessionID)
 	}
 	target := c.SubDomain
 	if c.ProxyType == "tcp" {
 		target = ":" + strconv.Itoa(c.RemotePort)
 	}
-	h.Store.Audit(user.ID, "tunnel.open", fmt.Sprintf("%s %s", c.ProxyType, target))
-	h.logf("proxy ok: user=%s %s %s", user.Name, c.ProxyType, target)
+	h.Store.Audit(sess.UserID, "tunnel.open", fmt.Sprintf("%s %s", c.ProxyType, target))
+	h.logf("proxy ok: user=%s %s %s", sess.UserName, c.ProxyType, target)
 	return response{Unchange: true}
 }
 
 func (h *Handler) ping(raw json.RawMessage) response {
 	var c userOnlyContent
-	if err := json.Unmarshal(raw, &c); err != nil {
+	if err := json.Unmarshal(raw, &c); err != nil || !validUserInfo(c.User) {
 		return reject("malformed ping")
 	}
 	sess, why := h.session(c.User)
@@ -263,7 +321,7 @@ func (h *Handler) ping(raw json.RawMessage) response {
 
 func (h *Handler) closeProxy(raw json.RawMessage) response {
 	var c userOnlyContent
-	if err := json.Unmarshal(raw, &c); err != nil {
+	if err := json.Unmarshal(raw, &c); err != nil || !validUserInfo(c.User) || !boundedText(c.ProxyName, maxProxyNameBytes, false) {
 		return response{Unchange: true}
 	}
 	if idStr := c.User.Metas[metaSession]; idStr != "" {

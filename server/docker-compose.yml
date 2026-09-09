@@ -1,8 +1,30 @@
 services:
   frps:
-    image: snowdreamtech/frps:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.frps
+    image: ktunnel-frps:0.71.0
+    pull_policy: never
     container_name: frps
     restart: unless-stopped
     network_mode: host
+    user: "${FRPS_UID:?set FRPS_UID in server/.env}:${FRPS_GID:?set FRPS_GID in server/.env}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
     volumes:
-      - ./frps.toml:/etc/frp/frps.toml:ro
+      - type: bind
+        source: ./frps.toml
+        target: /etc/frp/frps.toml
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./relay-tls.pem
+        target: /run/secrets/relay-tls.pem
+        read_only: true
+        bind:
+          create_host_path: false

@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -16,6 +17,18 @@ import (
 )
 
 var ErrNotFound = errors.New("not found")
+
+// ProxyDeniedError is a policy rejection that is safe to return to a client.
+// Operational database errors must not be exposed through the plugin API.
+type ProxyDeniedError struct{ Reason string }
+
+func (e *ProxyDeniedError) Error() string { return e.Reason }
+
+// ProxyAdmission describes any stale-session proxy replaced by an admitted
+// request. A zero TakeoverSessionID means no takeover was needed.
+type ProxyAdmission struct {
+	TakeoverSessionID int64
+}
 
 // sessionStaleAfter is how long a session may go without a heartbeat before
 // it is considered gone. frps pings every 30s and gives up after 90s.
@@ -161,7 +174,10 @@ CREATE TABLE IF NOT EXISTS audit (
 `
 
 func Open(path string) (*Store, error) {
-	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
+	if err := secureDBFile(path); err != nil {
+		return nil, err
+	}
+	dsn := path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_txlock=immediate"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -183,7 +199,59 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("migrate: %w", err)
 		}
 	}
+	// Partial unique indexes enforce externally visible active resources while
+	// allowing unlimited historical (ended) rows. An early installation may
+	// already contain duplicates from the old check-then-insert path; do not
+	// make that database unopenable. AdmitProxy still serializes every new
+	// admission, and a later restart installs the indexes after old rows end.
+	for _, stmt := range []string{
+		`CREATE UNIQUE INDEX IF NOT EXISTS proxies_active_subdomain_unique
+		 ON proxies(subdomain) WHERE ended_at IS NULL AND subdomain <> ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS proxies_active_remote_port_unique
+		 ON proxies(remote_port) WHERE ended_at IS NULL AND remote_port <> 0`,
+	} {
+		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			db.Close()
+			return nil, fmt.Errorf("add active proxy uniqueness: %w", err)
+		}
+	}
 	return &Store{db: db}, nil
+}
+
+// secureDBFile creates a new database with private permissions, or tightens an
+// existing regular file before SQLite opens it. Special SQLite in-memory/URI
+// data sources are left to the driver and are used only by callers that opt in.
+func secureDBFile(path string) error {
+	if path == ":memory:" || strings.HasPrefix(path, "file:") {
+		return nil
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		f, createErr := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
+		if errors.Is(createErr, os.ErrExist) {
+			// Another legitimate opener may have won the creation race. Inspect
+			// the resulting path below rather than failing an otherwise safe open.
+			info, err = os.Lstat(path)
+		} else if createErr != nil {
+			return fmt.Errorf("create database file: %w", createErr)
+		} else if closeErr := f.Close(); closeErr != nil {
+			return fmt.Errorf("close database file: %w", closeErr)
+		} else {
+			return nil
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("inspect database file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("database path must be a regular file: %s", path)
+	}
+	if info.Mode().Perm() != 0o600 {
+		if err := os.Chmod(path, 0o600); err != nil {
+			return fmt.Errorf("secure database file permissions: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -743,6 +811,143 @@ func (s *Store) ExpireStaleSessions(ctx context.Context) error {
 }
 
 // ---------- proxies ----------
+
+// AdmitProxy performs all NewProxy policy checks and the active-row insert in
+// one IMMEDIATE SQLite transaction. This closes the check-then-insert races for
+// per-user quotas, HTTP subdomains and TCP remote ports, including callers in
+// separate processes opening the same database.
+func (s *Store) AdmitProxy(sessionID int64, runID, name, typ, subdomain string, remotePort int) (ProxyAdmission, error) {
+	tx, err := s.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		return ProxyAdmission{}, err
+	}
+	defer tx.Rollback()
+
+	var userID int64
+	var maxTunnels, disabled, killed int
+	var sessionEnded, tokenRevoked sql.NullInt64
+	err = tx.QueryRow(`SELECT s.user_id, u.max_tunnels, u.disabled, s.killed, s.ended_at, t.revoked_at
+		FROM sessions s JOIN users u ON u.id = s.user_id JOIN tokens t ON t.id = s.token_id
+		WHERE s.id = ?`, sessionID).Scan(&userID, &maxTunnels, &disabled, &killed, &sessionEnded, &tokenRevoked)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ProxyAdmission{}, &ProxyDeniedError{Reason: "session not recognised - reconnect"}
+	}
+	if err != nil {
+		return ProxyAdmission{}, err
+	}
+	if killed != 0 || sessionEnded.Valid {
+		return ProxyAdmission{}, &ProxyDeniedError{Reason: "session terminated by administrator"}
+	}
+	if tokenRevoked.Valid {
+		return ProxyAdmission{}, &ProxyDeniedError{Reason: "token has been revoked"}
+	}
+	if disabled != 0 {
+		return ProxyAdmission{}, &ProxyDeniedError{Reason: "account is disabled"}
+	}
+
+	n := now()
+	admission := ProxyAdmission{}
+	switch typ {
+	case "http":
+		if subdomain == "ktunnel" {
+			return ProxyAdmission{}, &ProxyDeniedError{Reason: `subdomain "ktunnel" is reserved for the web portal`}
+		}
+		var ownerID int64
+		var ownerName string
+		err = tx.QueryRow(`SELECT r.user_id, u.name FROM reservations r JOIN users u ON u.id = r.user_id
+			WHERE r.subdomain = ?`, subdomain).Scan(&ownerID, &ownerName)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return ProxyAdmission{}, err
+		}
+		if err == nil && ownerID != userID {
+			return ProxyAdmission{}, &ProxyDeniedError{Reason: fmt.Sprintf("subdomain %q belongs to %s", subdomain, ownerName)}
+		}
+
+		var holders, otherUser, sameSession int
+		var holderSessionID int64
+		err = tx.QueryRow(`SELECT COUNT(*),
+			COALESCE(MAX(CASE WHEN user_id <> ? THEN 1 ELSE 0 END), 0),
+			COALESCE(MAX(CASE WHEN session_id = ? THEN 1 ELSE 0 END), 0),
+			COALESCE(MAX(session_id), 0)
+			FROM proxies WHERE subdomain = ? AND ended_at IS NULL`, userID, sessionID, subdomain).
+			Scan(&holders, &otherUser, &sameSession, &holderSessionID)
+		if err != nil {
+			return ProxyAdmission{}, err
+		}
+		if holders != 0 {
+			if otherUser != 0 || sameSession != 0 {
+				return ProxyAdmission{}, &ProxyDeniedError{Reason: fmt.Sprintf("subdomain %q is already in use", subdomain)}
+			}
+			if _, err := tx.Exec(`UPDATE proxies SET ended_at = ? WHERE subdomain = ? AND ended_at IS NULL`, n, subdomain); err != nil {
+				return ProxyAdmission{}, err
+			}
+			admission.TakeoverSessionID = holderSessionID
+		}
+	case "tcp":
+		var lo, hi int
+		var rangeText string
+		if err := tx.QueryRow(`SELECT COALESCE((SELECT value FROM settings WHERE key = 'tcp_port_range'), '')`).Scan(&rangeText); err != nil {
+			return ProxyAdmission{}, err
+		}
+		if a, b, ok := strings.Cut(rangeText, "-"); ok {
+			lo, _ = strconv.Atoi(a)
+			hi, _ = strconv.Atoi(b)
+		}
+		if lo == 0 || hi == 0 || lo > hi {
+			lo, hi = 20000, 29999
+		}
+		if remotePort < lo || remotePort > hi {
+			return ProxyAdmission{}, &ProxyDeniedError{Reason: fmt.Sprintf("remote port must be between %d and %d", lo, hi)}
+		}
+
+		var holders, otherUser, sameSession int
+		var holderSessionID int64
+		err = tx.QueryRow(`SELECT COUNT(*),
+			COALESCE(MAX(CASE WHEN user_id <> ? THEN 1 ELSE 0 END), 0),
+			COALESCE(MAX(CASE WHEN session_id = ? THEN 1 ELSE 0 END), 0),
+			COALESCE(MAX(session_id), 0)
+			FROM proxies WHERE remote_port = ? AND ended_at IS NULL`, userID, sessionID, remotePort).
+			Scan(&holders, &otherUser, &sameSession, &holderSessionID)
+		if err != nil {
+			return ProxyAdmission{}, err
+		}
+		if holders != 0 {
+			if otherUser != 0 || sameSession != 0 {
+				return ProxyAdmission{}, &ProxyDeniedError{Reason: fmt.Sprintf("remote port %d is already in use", remotePort)}
+			}
+			if _, err := tx.Exec(`UPDATE proxies SET ended_at = ? WHERE remote_port = ? AND ended_at IS NULL`, n, remotePort); err != nil {
+				return ProxyAdmission{}, err
+			}
+			admission.TakeoverSessionID = holderSessionID
+		}
+	default:
+		return ProxyAdmission{}, &ProxyDeniedError{Reason: fmt.Sprintf("proxy type %q is not allowed", typ)}
+	}
+
+	var active int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM proxies WHERE user_id = ? AND ended_at IS NULL`, userID).Scan(&active); err != nil {
+		return ProxyAdmission{}, err
+	}
+	if active >= maxTunnels {
+		return ProxyAdmission{}, &ProxyDeniedError{Reason: fmt.Sprintf("tunnel limit reached (%d)", maxTunnels)}
+	}
+	if _, err := tx.Exec(`INSERT INTO proxies(session_id, user_id, run_id, name, type, subdomain, remote_port, started_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?)`, sessionID, userID, runID, name, typ, subdomain, remotePort, n); err != nil {
+		// A uniqueness error can only mean a concurrent/external holder won.
+		// Convert it to a policy denial instead of leaking SQLite details.
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			if typ == "http" {
+				return ProxyAdmission{}, &ProxyDeniedError{Reason: fmt.Sprintf("subdomain %q is already in use", subdomain)}
+			}
+			return ProxyAdmission{}, &ProxyDeniedError{Reason: fmt.Sprintf("remote port %d is already in use", remotePort)}
+		}
+		return ProxyAdmission{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ProxyAdmission{}, err
+	}
+	return admission, nil
+}
 
 func (s *Store) AddProxy(sessionID, userID int64, runID, name, typ, subdomain string, remotePort int) error {
 	_, err := s.db.Exec(`INSERT INTO proxies(session_id, user_id, run_id, name, type, subdomain, remote_port, started_at)

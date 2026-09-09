@@ -11,6 +11,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,6 +29,14 @@ import (
 )
 
 var version = "dev"
+
+const (
+	httpReadHeaderTimeout = 5 * time.Second
+	httpReadTimeout       = 15 * time.Second
+	httpWriteTimeout      = 30 * time.Second
+	httpIdleTimeout       = 60 * time.Second
+	httpMaxHeaderBytes    = 16 << 10
+)
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -86,12 +95,20 @@ func run(args []string) error {
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	webAddr := fs.String("web", "127.0.0.1:7600", "dashboard listen address")
+	webHost := fs.String("web-host", "", "canonical external dashboard hostname (recommended behind a proxy)")
 	pluginAddr := fs.String("plugin", "127.0.0.1:7601", "frps plugin listen address (keep on loopback)")
+	allowPublicListeners := fs.Bool("allow-public-listeners", false, "allow non-loopback web/plugin listeners (requires external firewalling)")
 	server := fs.String("server", "", "public address clients connect to (baked into tokens)")
 	port := fs.Int("port", 0, "frps bind port (baked into tokens)")
 	domain := fs.String("domain", "", "wildcard domain (baked into tokens)")
 	tcpRange := fs.String("tcp-range", "", "allowed remote ports for tcp tunnels, e.g. 20000-29999")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := validateListenAddress("web", *webAddr, *allowPublicListeners); err != nil {
+		return err
+	}
+	if err := validateListenAddress("plugin", *pluginAddr, *allowPublicListeners); err != nil {
 		return err
 	}
 
@@ -100,6 +117,14 @@ func cmdServe(args []string) error {
 		return err
 	}
 	defer st.Close()
+	logger := log.New(os.Stdout, "", log.LstdFlags)
+	dash, err := web.NewWithConfig(st, logger, web.Config{
+		CanonicalHost:     *webHost,
+		TrustedProxyCIDRs: []string{"127.0.0.0/8", "::1/128"},
+	})
+	if err != nil {
+		return err
+	}
 
 	if *server != "" || *domain != "" {
 		info, _ := st.ServerInfo()
@@ -120,12 +145,6 @@ func cmdServe(args []string) error {
 		if err := st.SetSetting("tcp_port_range", *tcpRange); err != nil {
 			return err
 		}
-	}
-
-	logger := log.New(os.Stdout, "", log.LstdFlags)
-	dash, err := web.New(st, logger)
-	if err != nil {
-		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -153,8 +172,8 @@ func cmdServe(args []string) error {
 	pluginMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })
 
 	servers := []*http.Server{
-		{Addr: *pluginAddr, Handler: pluginMux, ReadHeaderTimeout: 5 * time.Second},
-		{Addr: *webAddr, Handler: dash.Handler(), ReadHeaderTimeout: 5 * time.Second},
+		newHTTPServer(*pluginAddr, pluginMux),
+		newHTTPServer(*webAddr, dash.Handler()),
 	}
 	errCh := make(chan error, len(servers))
 	for _, s := range servers {
@@ -183,6 +202,37 @@ func cmdServe(args []string) error {
 	}
 	logger.Printf("stopped")
 	return nil
+}
+
+func validateListenAddress(name, addr string, allowPublic bool) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid --%s listen address %q: %w", name, addr, err)
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
+		return fmt.Errorf("invalid --%s listen port %q", name, port)
+	}
+	ip := net.ParseIP(host)
+	if allowPublic {
+		return nil
+	}
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("--%s must use a loopback IP address; pass --allow-public-listeners only when an external firewall prevents public access", name)
+	}
+	return nil
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		ReadTimeout:       httpReadTimeout,
+		WriteTimeout:      httpWriteTimeout,
+		IdleTimeout:       httpIdleTimeout,
+		MaxHeaderBytes:    httpMaxHeaderBytes,
+	}
 }
 
 // ---------- admin ----------
@@ -552,7 +602,8 @@ func usage() {
 	fmt.Printf(`ktunneld %s - control plane for a self-hosted tunnel service
 
 USAGE
-  ktunneld serve [--web 127.0.0.1:7600] [--plugin 127.0.0.1:7601]
+  ktunneld serve [--web 127.0.0.1:7600] [--web-host portal.example.com]
+                 [--plugin 127.0.0.1:7601] [--allow-public-listeners]
                  [--server HOST --port 7000 --domain example.com] [--tcp-range 20000-29999]
 
   ktunneld admin set-password

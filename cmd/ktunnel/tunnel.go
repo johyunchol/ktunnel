@@ -8,9 +8,10 @@ import (
 
 	"github.com/fatedier/frp/client"
 	cproxy "github.com/fatedier/frp/client/proxy"
-	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/config/source"
+	v1 "github.com/fatedier/frp/pkg/config/v1"
 	"github.com/fatedier/frp/pkg/util/log"
+	"github.com/johyunchol/ktunnel/internal/store"
 )
 
 // Tunnel describes one exposed service.
@@ -39,6 +40,15 @@ func (t Tunnel) PublicURL(cfg *Config) string {
 // metadata and ktunneld (the frps plugin) decides. There is no shared frps
 // secret for clients to hold.
 func (t Tunnel) Run(ctx context.Context, cfg *Config, verbose bool, onReady func()) error {
+	if cfg.TokenVersion != store.TokenVersionCurrent || cfg.TLSServerName == "" {
+		return fmt.Errorf("verified relay TLS requires a kt2 token - sign in to the web portal and issue a new token")
+	}
+	caFile, removeCA, err := materializeRelayCA()
+	if err != nil {
+		return fmt.Errorf("prepare relay trust anchor: %w", err)
+	}
+	defer removeCA()
+
 	enabled := true
 
 	common := &v1.ClientCommonConfig{
@@ -47,7 +57,13 @@ func (t Tunnel) Run(ctx context.Context, cfg *Config, verbose bool, onReady func
 		LoginFailExit: &enabled,
 		Metadatas:     map[string]string{"token": cfg.Token},
 		Transport: v1.ClientTransportConfig{
-			TLS: v1.TLSClientConfig{Enable: &enabled},
+			TLS: v1.TLSClientConfig{
+				Enable: &enabled,
+				TLSConfig: v1.TLSConfig{
+					TrustedCaFile: caFile,
+					ServerName:    cfg.TLSServerName,
+				},
+			},
 			// frp disables heartbeats when TCP multiplexing is on (the
 			// default) and relies on yamux keepalives instead. We need the
 			// Ping hook to fire so that revoked tokens are cut off promptly.
