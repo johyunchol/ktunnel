@@ -680,13 +680,52 @@ func TestSecretResponsesAreNotCached(t *testing.T) {
 	if w.Header().Get("Cache-Control") != "no-store" || !strings.Contains(w.Body.String(), "임시 비밀번호가 발급되었습니다") {
 		t.Fatalf("temp response cache/body=%q %s", w.Header().Get("Cache-Control"), w.Body.String())
 	}
+	if !strings.Contains(w.Body.String(), `<div class="secret-value"><div class="secret-text"><code>`) {
+		t.Fatal("temporary password is missing the scrollable secret wrapper")
+	}
 	u, _ := s.st.UserByName("alice")
 	issue := url.Values{"csrf": {sess.csrf}, "label": {"laptop"}}
 	w = request(s, http.MethodPost, "/users/"+strconv.FormatInt(u.ID, 10)+"/tokens", c, issue)
 	if w.Header().Get("Cache-Control") != "no-store" || !strings.Contains(w.Body.String(), "토큰이 발급되었습니다") {
 		t.Fatalf("token response cache/body=%q %s", w.Header().Get("Cache-Control"), w.Body.String())
 	}
+	assertTokenCopyControl(t, w.Body.String())
 }
+
+func TestUserIssuedTokenRendersCopyControl(t *testing.T) {
+	s := newTestServer(t, "admin-password")
+	if err := s.st.SetServerInfo(store.ServerInfo{Addr: "relay", Port: 7000, Domain: "example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	addWebUser(t, s, "alice", "alice-password", false)
+	c, sess := loginSession(t, s, "alice", "alice-password")
+	w := request(s, http.MethodPost, "/me/tokens", c, url.Values{
+		"csrf":  {sess.csrf},
+		"label": {"phone"},
+	})
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	assertTokenCopyControl(t, w.Body.String())
+}
+
+func assertTokenCopyControl(t *testing.T, body string) {
+	t.Helper()
+	for _, want := range []string{
+		`id="new-token"`,
+		`type="button"`,
+		`data-copy-target="new-token"`,
+		`aria-describedby="new-token-copy-status"`,
+		`role="status"`,
+		`aria-live="polite"`,
+		`토큰 복사`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("issued token page does not contain %q", want)
+		}
+	}
+}
+
 func reqWithCookie(c *http.Cookie) *http.Request {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.AddCookie(c)

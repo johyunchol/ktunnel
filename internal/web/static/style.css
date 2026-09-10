@@ -1017,12 +1017,20 @@ input[type="number"] {
 }
 
 .secret-value {
+  display: flex;
+  align-items: center;
+  gap: 12px;
   margin: 18px 0;
   padding: 14px 16px;
-  overflow-x: auto;
   border: 1px solid #c5d2f5;
   border-radius: 7px;
   background: var(--white);
+}
+
+.secret-text {
+  min-width: 0;
+  flex: 1;
+  overflow-x: auto;
   user-select: all;
 }
 
@@ -1032,6 +1040,29 @@ input[type="number"] {
   color: var(--navy);
   font-size: 13px;
   white-space: nowrap;
+}
+
+.secret-copy {
+  min-height: 36px;
+  flex: 0 0 auto;
+  padding: 7px 12px;
+  font-size: 13px;
+}
+
+.secret-copy svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.8;
+}
+
+.secret-copy.is-copied {
+  border-color: var(--green);
+  background: var(--green-soft);
+  color: var(--green);
 }
 
 .token-next-steps {
@@ -1726,6 +1757,15 @@ input[type="number"] {
   .settings-card,
   .login-panel {
     padding: 21px;
+  }
+
+  .secret-value {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .secret-copy {
+    align-self: stretch;
   }
 
   .auth-shell .flash {
